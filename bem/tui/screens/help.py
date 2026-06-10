@@ -17,6 +17,7 @@ BINDINGS_TABLE = [
     ("f",           "Forward",                       "Index"),
     ("m",           "Compose new",                   "Index"),
     ("e",           "Archive",                       "Index"),
+    ("s",           "Move to folder (AI suggests)",  "Index"),
     ("d",           "Delete (trash)",                "Index"),
     ("u",           "Toggle read / unread",          "Index"),
     ("!",           "Toggle star",                   "Index"),
@@ -38,6 +39,7 @@ BINDINGS_TABLE = [
     (":zero [hint]", "Agent: file, archive + draft replies", "Agent"),
     (":agent <goal>", "Agent: free-form goal",       "Agent"),
     (":rule <text>", "Save a standing filing rule",  "Agent"),
+    (":move <label>", "Move thread (creates label)", "General"),
     (":search <q>", "Search Gmail",                  "General"),
     ("?",           "This help",                     "General"),
 ]

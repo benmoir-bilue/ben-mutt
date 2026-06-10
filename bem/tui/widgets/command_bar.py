@@ -47,6 +47,13 @@ class CommandBar(Widget):
         self.display = False
         self.refresh()
 
+    def suggest(self, prefix: str, text: str) -> None:
+        """Complete the buffer with an async suggestion — but only if the user
+        hasn't typed beyond the prefix it was requested for."""
+        if self.display and self._buffer == prefix:
+            self._buffer = prefix + text
+            self.refresh()
+
     def on_key(self, event: events.Key) -> None:
         event.stop()
         if event.key == "escape":

@@ -91,6 +91,33 @@ class AIAssistant:
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         return json.loads(raw)
 
+    def suggest_label(
+        self, thread: "Thread", label_names: list[str], rules: str = ""
+    ) -> str:
+        """One fast call: pick the most logical folder for a thread.
+        Returns the model's answer verbatim — caller validates it against
+        the real label list."""
+        msg = thread.last_message
+        snippet = (msg.snippet if msg else thread.snippet)[:200]
+        sender = thread.sender
+        rules_part = f"User filing rules:\n{rules}\n\n" if rules.strip() else ""
+        prompt = (
+            "Pick the single best folder for this email from the list.\n"
+            f"Folders: {', '.join(label_names)}\n\n"
+            f"{rules_part}"
+            f"From: {sender}\n"
+            f"Subject: {thread.subject}\n"
+            f"Snippet: {snippet}\n\n"
+            "Reply with one folder name only, exactly as written in the list."
+        )
+        resp = self._client.messages.create(
+            model=self._model_fast,
+            max_tokens=32,
+            system="You file emails into folders. Output only the folder name.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+
     def _stream(
         self, user_prompt: str, model: str, max_tokens: int = 1024
     ) -> Generator[str, None, None]:

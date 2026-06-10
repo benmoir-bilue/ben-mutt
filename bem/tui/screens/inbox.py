@@ -17,7 +17,7 @@ from bem.config import Config, RULES_FILE
 from bem.gmail import GmailClient
 from bem.gmail.models import TRIAGE_STYLES, Label as GmailLabel, Thread, TriageLevel
 from bem.ai import AIAssistant
-from bem.ai.agent import EmailAgent
+from bem.ai.agent import EmailAgent, _load_rules
 from bem.ai.tools import PlanAction
 from bem.tui.widgets import (
     FolderList, MessageList, MessagePreview, AIPanel, AgentPanel, CommandBar
@@ -131,6 +131,14 @@ def _sort_goal(hint: str = "") -> str:
     return goal
 
 
+def _match_label(labels: list[GmailLabel], name: str) -> Optional[GmailLabel]:
+    """Resolve a user-typed (or model-suggested) label name, case-insensitively."""
+    wanted = name.strip().lower()
+    if not wanted:
+        return None
+    return next((l for l in labels if l.name.lower() == wanted), None)
+
+
 def _zero_goal(hint: str = "") -> str:
     goal = (
         "Get the user's inbox to zero.\n"
@@ -195,6 +203,7 @@ class InboxScreen(Screen):
         Binding("f", "forward", "Forward", show=False),
         Binding("m", "compose", "Compose", show=False),
         Binding("e", "archive", "Archive", show=False),
+        Binding("s", "move", "Move", show=False),
         Binding("d", "delete", "Delete", show=False),
         Binding("u", "toggle_unread", "Unread", show=False),
         Binding("!", "toggle_star", "Star", show=False),
@@ -220,6 +229,7 @@ class InboxScreen(Screen):
         self._thread_cache: dict[str, Thread] = {}
         self._preview_timer: Optional[Timer] = None
         self._pending_replies: list[PlanAction] = []
+        self._labels: list[GmailLabel] = []
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -283,6 +293,7 @@ class InboxScreen(Screen):
 
     def _on_labels_loaded(self, labels: list[GmailLabel]) -> None:
         log.debug("_on_labels_loaded: %d labels", len(labels))
+        self._labels = labels
         self.query_one(FolderList).populate(labels)
 
     def _on_threads_loaded(
@@ -497,6 +508,33 @@ class InboxScreen(Screen):
     def action_change_folder(self) -> None:
         self.query_one(FolderList).focus()
 
+    def action_move(self) -> None:
+        """Open command mode pre-filled with `move `, then let a fast model
+        suggest the most logical destination while the user can keep typing."""
+        thread = self._current_thread
+        if not thread:
+            return
+        self.action_command_mode("move ")
+        if self._ai and any(l.type == "user" for l in self._labels):
+            self._suggest_move_worker(thread)
+
+    @work(thread=True, exclusive=True, group="move-suggest", exit_on_error=False)
+    def _suggest_move_worker(self, thread: Thread) -> None:
+        worker = get_current_worker()
+        user_labels = [l for l in self._labels if l.type == "user"]
+        try:
+            answer = self._ai.suggest_label(
+                thread, [l.name for l in user_labels], rules=_load_rules()
+            )
+        except Exception as e:
+            log.debug("move suggestion failed: %s", e)
+            return
+        match = _match_label(user_labels, answer)
+        if match is not None and not worker.is_cancelled:
+            self.app.call_from_thread(
+                lambda: self.query_one(CommandBar).suggest("move ", match.name)
+            )
+
     def action_command_mode(self, prefill: str = "") -> None:
         self.query_one(StatusBar).display = False
         self.query_one(CommandBar).show(prefill)
@@ -578,8 +616,8 @@ class InboxScreen(Screen):
         if listed:
             self.query_one(MessageList).update_thread(listed)
 
-    def _after_mutation(self, thread_id: str, op: str) -> None:
-        destructive = op in ("archive", "trash")
+    def _after_mutation(self, thread_id: str, op: str, note: str = "") -> None:
+        destructive = op in ("archive", "trash", "move")
         if destructive:
             self._thread_cache.pop(thread_id, None)
             msg_list = self.query_one(MessageList)
@@ -598,7 +636,7 @@ class InboxScreen(Screen):
             self._apply_local_label_change(thread_id, op)
         label = {"archive": "Archived", "trash": "Deleted", "mark_read": "Marked read",
                  "mark_unread": "Marked unread", "star": "Starred", "unstar": "Unstarred"}.get(op, op)
-        self.notify(label)
+        self.notify(note or label)
         self._update_status()
         self.load_labels()  # refresh folder unread counts
 
@@ -702,6 +740,9 @@ class InboxScreen(Screen):
         if cmd == "search":
             self._do_search(arg)
             return
+        if cmd in ("move", "mv"):
+            self._do_move(arg)
+            return
         if cmd == "sort":
             self._start_agent("Sorting inbox", _sort_goal(arg))
             return
@@ -734,6 +775,46 @@ class InboxScreen(Screen):
             self._ai_command("custom", raw)
         else:
             self.notify(f"Unknown command: {cmd}", severity="warning")
+
+    def _do_move(self, label_name: str) -> None:
+        label_name = label_name.strip()
+        if not label_name:
+            self.notify("Usage: move <label>", severity="warning")
+            return
+        thread = self._current_thread
+        if not thread:
+            self.notify("No thread selected", severity="warning")
+            return
+        self._move_worker(thread.id, label_name)
+
+    @work(thread=True, group="mutations", exit_on_error=False)
+    def _move_worker(self, thread_id: str, label_name: str) -> None:
+        worker = get_current_worker()
+        try:
+            labels = self._labels or self.gmail.list_labels()
+            target = _match_label(labels, label_name)
+            created = False
+            if target is None:
+                target = self.gmail.create_label(label_name)
+                created = True
+            remove = ["INBOX"]
+            current = self._current_label_id
+            if current and current != target.id and any(
+                l.id == current and l.type == "user" for l in labels
+            ):
+                remove.append(current)  # moving out of a label folder, not just inbox
+            self.gmail.modify_thread(
+                thread_id, add_labels=[target.id], remove_labels=remove
+            )
+        except Exception as e:
+            log.error("move failed: %s\n%s", e, traceback.format_exc())
+            if not worker.is_cancelled:
+                self.app.call_from_thread(
+                    self.notify, f"Move failed: {_describe_error(e)}", severity="error")
+            return
+        if not worker.is_cancelled:
+            note = f"Moved to {target.name}" + (" (new label)" if created else "")
+            self.app.call_from_thread(self._after_mutation, thread_id, "move", note)
 
     def _do_search(self, query: str) -> None:
         if not query:
