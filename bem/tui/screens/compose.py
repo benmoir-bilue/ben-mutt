@@ -97,11 +97,15 @@ def build_new_draft() -> str:
     return COMPOSE_TEMPLATE.format(to="", cc="", subject="", body_prefix="")
 
 
-def launch_editor(draft_text: str, editor: str) -> Optional[str]:
+def launch_editor(
+    draft_text: str, editor: str, treat_unchanged_as_cancel: bool = True
+) -> Optional[str]:
     """Open $editor with the draft. Returns edited content, or None if aborted.
 
     Abort detection: if the file is unchanged after the editor exits, the user
     quit without saving (e.g. :q! in vim), so we treat it as a cancellation.
+    Pass treat_unchanged_as_cancel=False when the draft is already complete
+    (e.g. reviewing an AI draft) and saving it unmodified is a valid outcome.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".eml", delete=False, encoding="utf-8"
@@ -116,7 +120,7 @@ def launch_editor(draft_text: str, editor: str) -> Optional[str]:
             return None
         content = Path(tmp_path).read_text(encoding="utf-8")
         # Treat unchanged file as cancellation (user did :q! or similar)
-        if content == draft_text:
+        if treat_unchanged_as_cancel and content == draft_text:
             return None
         return content
     finally:

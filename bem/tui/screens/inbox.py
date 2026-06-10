@@ -131,6 +131,25 @@ def _sort_goal(hint: str = "") -> str:
     return goal
 
 
+def _zero_goal(hint: str = "") -> str:
+    goal = (
+        "Get the user's inbox to zero.\n"
+        "1. Learn the folder taxonomy with list_labels.\n"
+        "2. Learn the user's writing voice: search_threads in:sent, then "
+        "get_thread on 2-3 recent sent threads. Note their tone, greeting, "
+        "sign-off, and typical length.\n"
+        "3. Search in:inbox (up to 50 threads).\n"
+        "4. Handle every thread: if it needs a reply from the user, "
+        "get_thread it and draft_reply in their voice (match their tone, "
+        "keep it as short as they would). If it is noise, archive_thread. "
+        "If it belongs in a folder, file_thread. Leave anything you cannot "
+        "handle confidently and say why in your summary."
+    )
+    if hint.strip():
+        goal += f"\nAdditional instruction from the user: {hint.strip()}"
+    return goal
+
+
 def _describe_error(e: Exception) -> str:
     """Turn a worker exception into a message that says what to do about it."""
     from googleapiclient.errors import HttpError
@@ -200,6 +219,7 @@ class InboxScreen(Screen):
         self._restore_cursor_row: Optional[int] = None
         self._thread_cache: dict[str, Thread] = {}
         self._preview_timer: Optional[Timer] = None
+        self._pending_replies: list[PlanAction] = []
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -277,7 +297,8 @@ class InboxScreen(Screen):
         try:
             msg_list = self.query_one(MessageList)
             msg_list.populate(threads, cursor_row=cursor_row)
-            msg_list.focus()
+            if self.query_one(AgentPanel).state == "idle":
+                msg_list.focus()  # don't steal focus from an active agent panel
             self._update_status()
             log.debug("_on_threads_loaded: populate complete")
         except Exception as e:
@@ -684,6 +705,9 @@ class InboxScreen(Screen):
         if cmd == "sort":
             self._start_agent("Sorting inbox", _sort_goal(arg))
             return
+        if cmd == "zero":
+            self._start_agent("Inbox zero", _zero_goal(arg))
+            return
         if cmd == "agent":
             if not arg:
                 self.notify("Usage: agent <goal>", severity="warning")
@@ -889,12 +913,18 @@ class InboxScreen(Screen):
     def on_agent_panel_plan_confirmed(self, event: AgentPanel.PlanConfirmed) -> None:
         panel = self.query_one(AgentPanel)
         plan = list(panel.plan)
-        if plan:
-            self._apply_plan_worker(plan, panel)
+        mutations = [a for a in plan if a.kind in ("file", "archive")]
+        self._pending_replies = [a for a in plan if a.kind == "reply"]
+        if mutations:
+            self._apply_plan_worker(mutations, panel)
+        elif self._pending_replies:
+            replies, self._pending_replies = self._pending_replies, []
+            panel.start_review(replies, safe_mode=self.config.safe_mode)
         event.stop()
 
     def on_agent_panel_dismissed(self, event: AgentPanel.Dismissed) -> None:
         self.app.workers.cancel_group(self, "agent")
+        self._pending_replies = []
         self.query_one(AgentPanel).dismiss_panel()
         self.query_one(MessageList).focus()
         event.stop()
@@ -935,10 +965,52 @@ class InboxScreen(Screen):
             self.app.call_from_thread(self._on_plan_applied, applied, errors)
 
     def _on_plan_applied(self, applied: int, errors: int) -> None:
-        self.query_one(AgentPanel).mark_applied(applied, errors)
+        panel = self.query_one(AgentPanel)
+        if self._pending_replies:
+            replies, self._pending_replies = self._pending_replies, []
+            suffix = f", {errors} failed" if errors else ""
+            self.notify(f"Applied {applied} actions{suffix}")
+            panel.start_review(replies, safe_mode=self.config.safe_mode)
+        else:
+            panel.mark_applied(applied, errors)
         self._restore_cursor_row = self.query_one(MessageList).cursor_row
         self.load_threads(label_id=self._current_label_id)
         self.load_labels()
+
+    def on_agent_panel_reply_decision(self, event: AgentPanel.ReplyDecision) -> None:
+        panel = self.query_one(AgentPanel)
+        action, decision = event.action, event.decision
+        event.stop()
+        if decision == "skip":
+            panel.review_next("skipped")
+            return
+        thread = action.thread
+        if thread is None or thread.last_message is None:
+            self.notify("Draft is missing its thread context", severity="error")
+            panel.review_next("skipped")
+            return
+        draft_text = build_reply_draft(
+            thread, my_address=self.gmail.email_address, body=action.body
+        )
+        content: Optional[str] = draft_text
+        if decision == "edit":
+            with self.app.suspend():
+                content = launch_editor(
+                    draft_text, self.config.editor, treat_unchanged_as_cancel=False
+                )
+            if content is None:
+                panel.review_next("skipped")
+                return
+        to, cc, subject, body = parse_draft(content)
+        if not to or not body.strip():
+            self.notify("Skipped (empty To or body)", severity="warning")
+            panel.review_next("skipped")
+            return
+        if self.config.safe_mode:
+            self._save_draft_worker(to, cc, subject, body, thread)
+        else:
+            self._send_worker(to, cc, subject, body, thread)
+        panel.review_next("accepted")
 
     def _add_rule(self, text: str) -> None:
         text = text.strip()

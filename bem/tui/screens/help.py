@@ -35,6 +35,7 @@ BINDINGS_TABLE = [
     (":reply-draft [tone]", "Draft a reply",         "AI"),
     (":explain",    "Explain selected thread",       "AI"),
     (":sort [hint]", "Agent: file inbox into folders", "Agent"),
+    (":zero [hint]", "Agent: file, archive + draft replies", "Agent"),
     (":agent <goal>", "Agent: free-form goal",       "Agent"),
     (":rule <text>", "Save a standing filing rule",  "Agent"),
     (":search <q>", "Search Gmail",                  "General"),

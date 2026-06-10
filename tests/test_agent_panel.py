@@ -10,7 +10,7 @@ from bem.tui.widgets.agent_panel import AgentPanel
 class PanelApp(App):
     def __init__(self):
         super().__init__()
-        self.posted: list[str] = []
+        self.posted: list = []
 
     def compose(self) -> ComposeResult:
         yield AgentPanel(id="agent")
@@ -20,6 +20,9 @@ class PanelApp(App):
 
     def on_agent_panel_dismissed(self, event) -> None:
         self.posted.append("dismissed")
+
+    def on_agent_panel_reply_decision(self, event) -> None:
+        self.posted.append((event.decision, event.action.thread_id))
 
 
 PLAN = [
@@ -97,6 +100,72 @@ async def test_empty_plan_goes_straight_to_done():
         panel.begin("Sorting inbox")
         panel.show_result("Nothing to do.", [])
         assert panel.state == "done"
+
+
+def _reply_action(make_message, tid="t1", subject="Quarterly report"):
+    from bem.gmail.models import Thread
+    msg = make_message(id=f"m-{tid}", thread_id=tid, subject=subject)
+    thread = Thread(id=tid, snippet="s", messages=[msg])
+    return PlanAction(kind="reply", thread_id=tid, subject=subject,
+                      sender="Alice Smith", body="Hi Alice,\n\nOn it.\n\nBen",
+                      reason="needs answer", thread=thread)
+
+
+@pytest.mark.asyncio
+async def test_review_queue_decisions(make_message):
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin("Inbox zero")
+        items = [_reply_action(make_message, "t1"), _reply_action(make_message, "t2")]
+        panel.start_review(items, safe_mode=True)
+        await pilot.pause()
+        assert panel.state == "review"
+
+        await pilot.press("y")          # accept draft 1
+        await pilot.pause()
+        assert app.posted == [("accept", "t1")]
+        panel.review_next("accepted")   # inbox calls this after handling
+        assert panel._review_idx == 1
+
+        await pilot.press("n")          # skip draft 2
+        await pilot.pause()
+        assert app.posted[-1] == ("skip", "t2")
+        panel.review_next("skipped")
+
+        assert panel.state == "done"
+        assert (panel._accepted, panel._skipped) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_review_escape_finishes_early(make_message):
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin("Inbox zero")
+        panel.start_review([_reply_action(make_message, "t1"),
+                            _reply_action(make_message, "t2")], safe_mode=False)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert panel.state == "done"
+        assert "dismissed" not in app.posted  # first Esc ends review, not panel
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "dismissed" in app.posted
+
+
+@pytest.mark.asyncio
+async def test_edit_decision_posted(make_message):
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin("Inbox zero")
+        panel.start_review([_reply_action(make_message)], safe_mode=True)
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.posted == [("edit", "t1")]
 
 
 @pytest.mark.asyncio

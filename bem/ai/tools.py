@@ -114,22 +114,54 @@ AGENT_TOOLS: list[dict] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "draft_reply",
+        "description": (
+            "Queue a reply draft for a thread. You MUST call get_thread on "
+            "the thread first and read it in full. Write only the reply body "
+            "(greeting, content, sign-off) in the user's own voice — study "
+            "their tone first via their sent mail. No subject line, no "
+            "quoted text. The user reviews every draft before anything is "
+            "sent, and can edit or skip it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string"},
+                "body": {
+                    "type": "string",
+                    "description": "The reply body, written as the user would write it",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Very short justification, under 8 words",
+                },
+            },
+            "required": ["thread_id", "body", "reason"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
 @dataclass
 class PlanAction:
-    kind: str  # "file" | "archive"
+    kind: str  # "file" | "archive" | "reply"
     thread_id: str
     subject: str
     sender: str
     label_name: str = ""
     reason: str = ""
+    body: str = ""  # reply actions: the drafted reply text
+    thread: "Thread | None" = None  # reply actions: full thread, for send headers
 
     @property
     def description(self) -> str:
-        target = f"→ {self.label_name}" if self.kind == "file" else "→ archive"
-        return f"{target}  {self.subject}"
+        if self.kind == "file":
+            return f"→ {self.label_name}  {self.subject}"
+        if self.kind == "reply":
+            return f"→ reply  {self.subject}"
+        return f"→ archive  {self.subject}"
 
 
 class ToolExecutor:
@@ -140,6 +172,7 @@ class ToolExecutor:
         self.gmail = gmail
         self.plan: list[PlanAction] = []
         self._known: dict[str, "Thread"] = {t.id: t for t in (threads or [])}
+        self._full: set[str] = set()  # thread ids fetched in full via get_thread
 
     def execute(self, name: str, args: dict) -> tuple[str, bool]:
         """Run one tool call. Returns (result_text, is_error)."""
@@ -184,6 +217,7 @@ class ToolExecutor:
         if thread is None:
             return f"Thread not found: {thread_id}", True
         self._known[thread.id] = thread
+        self._full.add(thread.id)
         parts = [f"Subject: {thread.subject}"]
         for msg in thread.messages:
             date = msg.date.strftime("%d %b %H:%M") if msg.date else ""
@@ -211,8 +245,8 @@ class ToolExecutor:
             )
         if not label_name.strip():
             return "label_name must not be empty", True
-        # Replace any earlier queued action for the same thread
-        self.plan = [a for a in self.plan if a.thread_id != thread_id]
+        # Replace any earlier queued move for the same thread (replies coexist)
+        self._drop(thread_id, kinds=("file", "archive"))
         self.plan.append(PlanAction(
             kind="file", thread_id=thread_id, subject=info[0], sender=info[1],
             label_name=label_name.strip(), reason=reason.strip(),
@@ -227,9 +261,35 @@ class ToolExecutor:
                 "have seen via search_threads or get_thread.",
                 True,
             )
-        self.plan = [a for a in self.plan if a.thread_id != thread_id]
+        self._drop(thread_id, kinds=("file", "archive"))
         self.plan.append(PlanAction(
             kind="archive", thread_id=thread_id, subject=info[0], sender=info[1],
             reason=reason.strip(),
         ))
         return f"queued: archive '{info[0]}'", False
+
+    def _tool_draft_reply(
+        self, thread_id: str, body: str, reason: str = ""
+    ) -> tuple[str, bool]:
+        if thread_id not in self._full:
+            return (
+                f"Call get_thread on {thread_id} and read it in full before "
+                "drafting a reply.",
+                True,
+            )
+        if not body.strip():
+            return "body must not be empty", True
+        thread = self._known[thread_id]
+        self._drop(thread_id, kinds=("reply",))
+        self.plan.append(PlanAction(
+            kind="reply", thread_id=thread_id, subject=thread.subject,
+            sender=thread.sender, body=body.strip(), reason=reason.strip(),
+            thread=thread,
+        ))
+        return f"queued: reply to '{thread.subject}'", False
+
+    def _drop(self, thread_id: str, kinds: tuple[str, ...]) -> None:
+        self.plan = [
+            a for a in self.plan
+            if not (a.thread_id == thread_id and a.kind in kinds)
+        ]

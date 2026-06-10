@@ -61,6 +61,14 @@ class AgentPanel(Vertical):
     class Dismissed(TMessage):
         pass
 
+    class ReplyDecision(TMessage):
+        """User decided on the currently shown reply draft."""
+
+        def __init__(self, action: PlanAction, decision: str) -> None:
+            super().__init__()
+            self.action = action
+            self.decision = decision  # "accept" | "edit" | "skip"
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.state: str = "idle"
@@ -69,6 +77,11 @@ class AgentPanel(Vertical):
         self._frame = 0
         self._tool_count = 0
         self._started = 0.0
+        self._review: list[PlanAction] = []
+        self._review_idx = 0
+        self._review_safe = True
+        self._accepted = 0
+        self._skipped = 0
 
     def compose(self) -> ComposeResult:
         yield Label("", id="agent-title")
@@ -152,6 +165,12 @@ class AgentPanel(Vertical):
                         (" → ", "dim"),
                         (action.label_name, "bold cyan"),
                     )
+                elif action.kind == "reply":
+                    line = Text.assemble(
+                        (f"{i:>3} ", "dim"),
+                        ("reply   ", "magenta"),
+                        (_clip(action.subject, 48)),
+                    )
                 else:
                     line = Text.assemble(
                         (f"{i:>3} ", "dim"),
@@ -165,7 +184,9 @@ class AgentPanel(Vertical):
             self.query_one("#agent-title", Label).update(
                 f"⏸ Plan ready — {len(plan)} actions"
             )
-            self._footer("y apply   n/Esc discard   j/k scroll")
+            has_replies = any(a.kind == "reply" for a in plan)
+            apply_hint = "y apply + review drafts" if has_replies else "y apply"
+            self._footer(f"{apply_hint}   n/Esc discard   j/k scroll")
         else:
             self.state = "done"
             self.query_one("#agent-title", Label).update("✓ Done — nothing to apply")
@@ -186,6 +207,68 @@ class AgentPanel(Vertical):
         self._log.write(Text(""))
         style = "bold yellow" if errors else "bold green"
         self._log.write(Text(f"✓ {applied} applied{suffix}", style=style))
+        self._footer("Esc close")
+
+    # ── Reply review queue ──────────────────────────────────────────────────
+
+    def start_review(self, items: list[PlanAction], safe_mode: bool) -> None:
+        """Step through drafted replies one at a time for y/e/n decisions."""
+        if not self.is_mounted or not items:
+            return
+        self.state = "review"
+        self._review = list(items)
+        self._review_idx = 0
+        self._review_safe = safe_mode
+        self._accepted = 0
+        self._skipped = 0
+        self._show_review()
+
+    def _show_review(self) -> None:
+        item = self._review[self._review_idx]
+        log = self._log
+        log.clear()
+        to = item.sender
+        if item.thread is not None and item.thread.last_message is not None:
+            to = item.thread.last_message.from_address or item.sender
+        log.write(Text.assemble(("To:      ", "bold"), (to,)))
+        log.write(Text.assemble(("Subject: ", "bold"), (f"Re: {item.subject}",)))
+        if item.reason:
+            log.write(Text(f"Why:     {item.reason}", style="dim italic"))
+        log.write(Text("─" * 40, style="dim"))
+        for line in item.body.splitlines():
+            log.write(Text(line))
+        self.query_one("#agent-title", Label).update(
+            f"✉ Draft {self._review_idx + 1}/{len(self._review)} — "
+            f"{_clip(item.subject, 36)}"
+        )
+        accept = "y save draft" if self._review_safe else "y send"
+        self._footer(f"{accept}   e edit   n skip   Esc finish")
+
+    def review_next(self, outcome: str) -> None:
+        """Advance the queue; the inbox screen calls this after handling a decision."""
+        if self.state != "review":
+            return
+        if outcome == "accepted":
+            self._accepted += 1
+        elif outcome == "skipped":
+            self._skipped += 1
+        self._review_idx += 1
+        if self._review_idx >= len(self._review):
+            self._finish_review()
+        else:
+            self._show_review()
+
+    def _finish_review(self) -> None:
+        self.state = "done"
+        verb = "saved as drafts" if self._review_safe else "sent"
+        remaining = len(self._review) - self._review_idx
+        skipped = self._skipped + remaining
+        self.query_one("#agent-title", Label).update(
+            f"✓ Review done — {self._accepted} {verb}, {skipped} skipped"
+        )
+        self._log.clear()
+        style = "bold green" if self._accepted else "bold"
+        self._log.write(Text(f"✓ {self._accepted} {verb}, {skipped} skipped", style=style))
         self._footer("Esc close")
 
     def show_error(self, message: str) -> None:
@@ -218,6 +301,11 @@ class AgentPanel(Vertical):
             self.post_message(self.PlanConfirmed())
         elif self.state == "confirm" and key in ("n", "escape"):
             self.post_message(self.Dismissed())
+        elif self.state == "review" and key in ("y", "e", "n"):
+            decision = {"y": "accept", "e": "edit", "n": "skip"}[key]
+            self.post_message(self.ReplyDecision(self._review[self._review_idx], decision))
+        elif self.state == "review" and key == "escape":
+            self._finish_review()
         elif key == "escape" or (self.state == "done" and key == "q"):
             self.post_message(self.Dismissed())
         else:

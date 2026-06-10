@@ -116,3 +116,45 @@ class TestDeferredMutations:
     def test_bad_args(self, executor):
         out, err = executor.execute("file_thread", {"thread_id": "t1"})
         assert err
+
+
+class TestDraftReply:
+    def test_requires_full_thread_read_first(self, executor):
+        out, err = executor.execute(
+            "draft_reply", {"thread_id": "t1", "body": "Hi", "reason": "r"})
+        assert err and "get_thread" in out
+        assert executor.plan == []
+
+    def test_queues_after_get_thread(self, executor):
+        executor.execute("get_thread", {"thread_id": "t1"})
+        out, err = executor.execute(
+            "draft_reply",
+            {"thread_id": "t1", "body": "Hi Alice,\n\nDone.\n\nBen", "reason": "asked"})
+        assert not err and "queued" in out
+        action = executor.plan[0]
+        assert action.kind == "reply"
+        assert action.body.startswith("Hi Alice")
+        assert action.thread is not None  # carries the full thread for sending
+
+    def test_reply_coexists_with_archive_on_same_thread(self, executor):
+        executor.execute("get_thread", {"thread_id": "t1"})
+        executor.execute("draft_reply",
+                         {"thread_id": "t1", "body": "Hi", "reason": "r"})
+        executor.execute("archive_thread", {"thread_id": "t1", "reason": "done"})
+        kinds = sorted(a.kind for a in executor.plan)
+        assert kinds == ["archive", "reply"]
+
+    def test_redrafting_replaces_previous_reply(self, executor):
+        executor.execute("get_thread", {"thread_id": "t1"})
+        executor.execute("draft_reply",
+                         {"thread_id": "t1", "body": "v1", "reason": "r"})
+        executor.execute("draft_reply",
+                         {"thread_id": "t1", "body": "v2", "reason": "r"})
+        replies = [a for a in executor.plan if a.kind == "reply"]
+        assert len(replies) == 1 and replies[0].body == "v2"
+
+    def test_empty_body_rejected(self, executor):
+        executor.execute("get_thread", {"thread_id": "t1"})
+        out, err = executor.execute(
+            "draft_reply", {"thread_id": "t1", "body": "  ", "reason": "r"})
+        assert err
