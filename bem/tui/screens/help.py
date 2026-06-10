@@ -34,7 +34,10 @@ BINDINGS_TABLE = [
     (":triage",     "Triage inbox by priority",      "AI"),
     (":reply-draft [tone]", "Draft a reply",         "AI"),
     (":explain",    "Explain selected thread",       "AI"),
-    (":search <q>", "Search Gmail",                  "AI"),
+    (":sort [hint]", "Agent: file inbox into folders", "Agent"),
+    (":agent <goal>", "Agent: free-form goal",       "Agent"),
+    (":rule <text>", "Save a standing filing rule",  "Agent"),
+    (":search <q>", "Search Gmail",                  "General"),
     ("?",           "This help",                     "General"),
 ]
 

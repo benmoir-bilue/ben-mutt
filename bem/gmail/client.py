@@ -84,6 +84,14 @@ class GmailClient:
                 ))
         return sorted(labels, key=lambda l: l.sort_key)
 
+    def create_label(self, name: str) -> Label:
+        raw = self._svc().users().labels().create(
+            userId=self._user,
+            body={"name": name, "labelListVisibility": "labelShow",
+                  "messageListVisibility": "show"},
+        ).execute()
+        return Label(id=raw["id"], name=raw["name"], type=raw.get("type", "user"))
+
     # ── Thread listing ─────────────────────────────────────────────────────────
 
     def list_threads(

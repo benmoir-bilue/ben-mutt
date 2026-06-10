@@ -11,6 +11,7 @@ CONFIG_DIR = Path(os.environ.get("BEM_CONFIG_DIR", Path.home() / ".config" / "be
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
+RULES_FILE = CONFIG_DIR / "rules.md"
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -29,6 +30,7 @@ class Config:
     safe_mode: bool = True
     ai_model_fast: str = "claude-haiku-4-5-20251001"   # triage, summarise, explain
     ai_model_smart: str = "claude-sonnet-4-6"           # reply-draft, custom
+    ai_model_agent: str = "claude-opus-4-8"             # agentic :sort / :agent
 
     @classmethod
     def load(cls) -> Config:

@@ -13,12 +13,14 @@ from textual.widgets import Label, Static
 from textual.worker import get_current_worker
 
 import bem.log as bemlog
-from bem.config import Config
+from bem.config import Config, RULES_FILE
 from bem.gmail import GmailClient
 from bem.gmail.models import TRIAGE_STYLES, Label as GmailLabel, Thread, TriageLevel
 from bem.ai import AIAssistant
+from bem.ai.agent import EmailAgent
+from bem.ai.tools import PlanAction
 from bem.tui.widgets import (
-    FolderList, MessageList, MessagePreview, AIPanel, CommandBar
+    FolderList, MessageList, MessagePreview, AIPanel, AgentPanel, CommandBar
 )
 from bem.tui.screens.compose import (
     build_reply_draft, build_forward_draft, build_new_draft,
@@ -114,6 +116,21 @@ def _triage_heading_style(line: str) -> Optional[str]:
     return None
 
 
+def _sort_goal(hint: str = "") -> str:
+    goal = (
+        "Sort the user's inbox into folders.\n"
+        "1. Learn the folder taxonomy with list_labels. If unsure what the "
+        "user files in a label, sample it (search_threads label:Name).\n"
+        "2. Search in:inbox (up to 50 threads).\n"
+        "3. For each thread, queue file_thread or archive_thread when you are "
+        "confident. Leave threads that likely still need the user's reply, "
+        "and anything you are unsure about, in the inbox untouched."
+    )
+    if hint.strip():
+        goal += f"\nAdditional instruction from the user: {hint.strip()}"
+    return goal
+
+
 def _describe_error(e: Exception) -> str:
     """Turn a worker exception into a message that says what to do about it."""
     from googleapiclient.errors import HttpError
@@ -198,6 +215,7 @@ class InboxScreen(Screen):
             with Vertical(id="main-pane"):
                 yield MessageList(id="messages")
                 yield MessagePreview(id="preview")
+            yield AgentPanel(id="agent")
         yield CommandBar(id="command")
         yield StatusBar(id="status")
 
@@ -663,6 +681,18 @@ class InboxScreen(Screen):
         if cmd == "search":
             self._do_search(arg)
             return
+        if cmd == "sort":
+            self._start_agent("Sorting inbox", _sort_goal(arg))
+            return
+        if cmd == "agent":
+            if not arg:
+                self.notify("Usage: agent <goal>", severity="warning")
+                return
+            self._start_agent("Agent", arg)
+            return
+        if cmd == "rule":
+            self._add_rule(arg)
+            return
         if cmd in ("summarise", "summarize", "summary"):
             self._ai_command("summarise")
             return
@@ -812,6 +842,114 @@ class InboxScreen(Screen):
             counts[lvl.name] = counts.get(lvl.name, 0) + 1
         summary = "  ".join(f"{v} {k.replace('_', ' ').lower()}" for k, v in counts.items())
         self.notify(f"Triage applied: {summary}")
+
+    # ── Email agent (:sort / :agent) ───────────────────────────────────────────
+
+    def _start_agent(self, title: str, goal: str) -> None:
+        if not self.config.anthropic_api_key:
+            self.notify("ANTHROPIC_API_KEY not set — agent unavailable", severity="warning")
+            return
+        panel = self.query_one(AgentPanel)
+        if panel.is_busy:
+            self.notify("Agent already running — Esc in the panel to cancel", severity="warning")
+            return
+        panel.begin(title)
+        self._run_agent_worker(goal, panel)
+
+    @work(thread=True, exclusive=True, group="agent", exit_on_error=False)
+    def _run_agent_worker(self, goal: str, panel: AgentPanel) -> None:
+        worker = get_current_worker()
+        agent = EmailAgent(
+            api_key=self.config.anthropic_api_key,
+            model=self.config.ai_model_agent,
+            gmail=self.gmail,
+        )
+
+        def emit(event: tuple) -> None:
+            if not worker.is_cancelled:
+                self.app.call_from_thread(panel.agent_event, event)
+
+        try:
+            result = agent.run(
+                goal,
+                threads=list(self._threads),
+                emit=emit,
+                is_cancelled=lambda: worker.is_cancelled,
+            )
+        except Exception as e:
+            log.error("agent run failed: %s\n%s", e, traceback.format_exc())
+            if not worker.is_cancelled:
+                self.app.call_from_thread(panel.show_error, _describe_error(e))
+            return
+        if result is not None and not worker.is_cancelled:
+            log.debug("agent finished: %d turns, %d plan actions",
+                      result.turns, len(result.plan))
+            self.app.call_from_thread(panel.show_result, result.summary, result.plan)
+
+    def on_agent_panel_plan_confirmed(self, event: AgentPanel.PlanConfirmed) -> None:
+        panel = self.query_one(AgentPanel)
+        plan = list(panel.plan)
+        if plan:
+            self._apply_plan_worker(plan, panel)
+        event.stop()
+
+    def on_agent_panel_dismissed(self, event: AgentPanel.Dismissed) -> None:
+        self.app.workers.cancel_group(self, "agent")
+        self.query_one(AgentPanel).dismiss_panel()
+        self.query_one(MessageList).focus()
+        event.stop()
+
+    @work(thread=True, group="agent-apply", exit_on_error=False)
+    def _apply_plan_worker(self, plan: list[PlanAction], panel: AgentPanel) -> None:
+        worker = get_current_worker()
+        applied = 0
+        errors = 0
+        try:
+            labels = {l.name.lower(): l.id for l in self.gmail.list_labels()}
+        except Exception as e:
+            if not worker.is_cancelled:
+                self.app.call_from_thread(panel.show_error, _describe_error(e))
+            return
+        for action in plan:
+            if worker.is_cancelled:
+                return
+            try:
+                if action.kind == "file":
+                    label_id = labels.get(action.label_name.lower())
+                    if label_id is None:
+                        new_label = self.gmail.create_label(action.label_name)
+                        labels[new_label.name.lower()] = new_label.id
+                        label_id = new_label.id
+                    self.gmail.modify_thread(
+                        action.thread_id,
+                        add_labels=[label_id],
+                        remove_labels=["INBOX"],
+                    )
+                else:
+                    self.gmail.archive(action.thread_id)
+                applied += 1
+            except Exception as e:
+                log.error("plan apply failed for %s: %s", action.thread_id, e)
+                errors += 1
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._on_plan_applied, applied, errors)
+
+    def _on_plan_applied(self, applied: int, errors: int) -> None:
+        self.query_one(AgentPanel).mark_applied(applied, errors)
+        self._restore_cursor_row = self.query_one(MessageList).cursor_row
+        self.load_threads(label_id=self._current_label_id)
+        self.load_labels()
+
+    def _add_rule(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            self.notify("Usage: rule <filing rule, e.g. invoices from Xero -> Finance>",
+                        severity="warning")
+            return
+        RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(RULES_FILE, "a", encoding="utf-8") as f:
+            f.write(f"- {text}\n")
+        self.notify(f"Rule saved to {RULES_FILE.name}")
 
     # ── Status bar ─────────────────────────────────────────────────────────────
 
