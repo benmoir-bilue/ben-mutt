@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# credentials — never commit these
+~/.config/bem/token.json
+token.json
+credentials.json
+
+.env
+.DS_Store
+*.swp
+*.swo
+
+.claude/
