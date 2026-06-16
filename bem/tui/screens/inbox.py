@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 import traceback
+from collections import Counter
 from typing import Optional
 
-from textual import work
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -15,16 +17,29 @@ from textual.worker import get_current_worker
 import bem.log as bemlog
 from bem.config import Config, RULES_FILE
 from bem.gmail import GmailClient
-from bem.gmail.models import TRIAGE_STYLES, Label as GmailLabel, Thread, TriageLevel
+from bem.gmail.models import (
+    TRIAGE_STYLES, Label as GmailLabel, Message, Thread, TriageLevel
+)
 from bem.ai import AIAssistant
+from bem.ai.commands import model_label
+from bem.ai import copilot as copilot_mod
+from bem.ai.copilot import CopilotBrain, CopilotExecutor
 from bem.ai.agent import EmailAgent, _load_rules
+from bem.calendar import parse_ics, CalendarInvite
+from bem.calendar.client import (
+    CalendarClient, Conflict, disposition_mark,
+    MARK_ACCEPTED, MARK_TENTATIVE, MARK_DECLINED, MARK_CANCELLED,
+    MARK_OUTOFSYNC, MARK_PENDING, SAFE_TO_DELETE_MARKS,
+)
+from bem.ai.tips import Tips, load_tips
 from bem.ai.tools import PlanAction
 from bem.tui.widgets import (
-    FolderList, MessageList, MessagePreview, AIPanel, AgentPanel, CommandBar
+    FolderList, MessageList, MessagePreview, AIPanel, AgentPanel, CopilotPanel,
+    CommandBar
 )
 from bem.tui.screens.compose import (
     build_reply_draft, build_forward_draft, build_new_draft,
-    launch_editor, parse_draft,
+    launch_editor, parse_draft, AI_DRAFT_MARKER,
 )
 from bem.tui.screens.help import HelpScreen
 
@@ -116,11 +131,31 @@ def _triage_heading_style(line: str) -> Optional[str]:
     return None
 
 
-def _sort_goal(hint: str = "") -> str:
-    goal = (
-        "Sort the user's inbox into folders.\n"
+def _tips_taxonomy(tips: Optional[Tips]) -> Optional[str]:
+    """Step-1 goal text telling the agent to rely on saved folder tips
+    instead of scanning labels; None when there are no usable tips."""
+    if tips is None or not tips.content:
+        return None
+    date = (
+        tips.generated_at.astimezone().strftime("%d %b %Y")
+        if tips.generated_at else "an unknown date"
+    )
+    return (
+        f"1. Use these saved folder tips (recorded {date}) to decide "
+        "where things go — call list_labels only to confirm the folder "
+        "list, and do not sample labels:\n"
+        f"--- folder tips ---\n{tips.content}\n--- end tips ---\n"
+    )
+
+
+def _sort_goal(hint: str = "", tips: Optional[Tips] = None) -> str:
+    taxonomy = _tips_taxonomy(tips) or (
         "1. Learn the folder taxonomy with list_labels. If unsure what the "
         "user files in a label, sample it (search_threads label:Name).\n"
+    )
+    goal = (
+        "Sort the user's inbox into folders.\n"
+        + taxonomy +
         "2. Search in:inbox (up to 50 threads).\n"
         "3. For each thread, queue file_thread or archive_thread when you are "
         "confident. Leave threads that likely still need the user's reply, "
@@ -131,6 +166,23 @@ def _sort_goal(hint: str = "") -> str:
     return goal
 
 
+def _tips_goal() -> str:
+    return (
+        "Build the folder-tips knowledge file, so future sorting runs do not "
+        "have to re-scan every folder.\n"
+        "1. list_labels to get the user's folders.\n"
+        "2. For each user label, search_threads label:Name with max_results "
+        "10 to read its latest threads. Use get_thread only when a subject "
+        "and snippet are too vague to tell what the folder holds.\n"
+        "3. For each folder, record the people involved (names, addresses), "
+        "the companies (senders, domains), and what material is discussed.\n"
+        "4. Call save_folder_tips ONCE with concise notes for every folder, "
+        "as markdown sections: '## <Label>' followed by '- people:', "
+        "'- companies:' and '- topics:' lines. Keep each folder to at most "
+        "3 short lines."
+    )
+
+
 def _match_label(labels: list[GmailLabel], name: str) -> Optional[GmailLabel]:
     """Resolve a user-typed (or model-suggested) label name, case-insensitively."""
     wanted = name.strip().lower()
@@ -139,10 +191,13 @@ def _match_label(labels: list[GmailLabel], name: str) -> Optional[GmailLabel]:
     return next((l for l in labels if l.name.lower() == wanted), None)
 
 
-def _zero_goal(hint: str = "") -> str:
+def _zero_goal(hint: str = "", tips: Optional[Tips] = None) -> str:
+    taxonomy = _tips_taxonomy(tips) or (
+        "1. Learn the folder taxonomy with list_labels.\n"
+    )
     goal = (
         "Get the user's inbox to zero.\n"
-        "1. Learn the folder taxonomy with list_labels.\n"
+        + taxonomy +
         "2. Learn the user's writing voice: search_threads in:sent, then "
         "get_thread on 2-3 recent sent threads. Note their tone, greeting, "
         "sign-off, and typical length.\n"
@@ -208,6 +263,10 @@ class InboxScreen(Screen):
         Binding("u", "toggle_unread", "Unread", show=False),
         Binding("!", "toggle_star", "Star", show=False),
         Binding("c", "change_folder", "Folder", show=False),
+        Binding("A", "rsvp_accept", "Accept invite", show=False),
+        Binding("M", "rsvp_maybe", "Maybe (tentative)", show=False),
+        Binding("X", "rsvp_decline", "Decline invite", show=False),
+        Binding("t", "talk_to_mutt", "Talk to Mutt", show=False),
         Binding("colon", "command_mode", "Command", show=False),
         Binding("q", "quit_app", "Quit", show=False),
         Binding("ctrl+r", "refresh", "Refresh", show=False),
@@ -225,11 +284,29 @@ class InboxScreen(Screen):
         self._next_page_token: Optional[str] = None
         self._threads: list[Thread] = []
         self._current_thread: Optional[Thread] = None
+        # Set when the cursor is on a message row inside an expanded thread;
+        # reply/forward then target this message instead of the newest one.
+        self._current_message: Optional[Message] = None
         self._restore_cursor_row: Optional[int] = None
         self._thread_cache: dict[str, Thread] = {}
         self._preview_timer: Optional[Timer] = None
         self._pending_replies: list[PlanAction] = []
         self._labels: list[GmailLabel] = []
+        self._calendar: Optional[CalendarClient] = None
+        # thread_id -> invite status ("accepted" | "declined" | ...). Caches
+        # calendar lookups so re-loading a folder doesn't re-query everything.
+        self._invite_status: dict[str, str] = {}
+        self._invite_objs: dict[str, "CalendarInvite"] = {}  # thread_id -> parsed .ics
+        self._invite_conflicts: dict[str, list[Conflict]] = {}  # pending invites only
+        self._voice_samples: Optional[list[str]] = None  # cached Sent-folder samples
+        # ── Mutt, the live copilot ──
+        self._copilot: Optional[CopilotBrain] = None
+        self._copilot_on = False
+        self._copilot_timer: Optional[Timer] = None
+        self._seen_thread_ids: set[str] = set()      # for new-mail delta
+        self._copilot_chat: list[dict] = []           # rolling chat history
+        self._last_activity: float = 0.0              # monotonic; for idle detection
+        self._copilot_word = 0                        # rotates status words
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -246,6 +323,7 @@ class InboxScreen(Screen):
                 yield MessageList(id="messages")
                 yield MessagePreview(id="preview")
             yield AgentPanel(id="agent")
+            yield CopilotPanel(id="copilot")
         yield CommandBar(id="command")
         yield StatusBar(id="status")
 
@@ -314,6 +392,473 @@ class InboxScreen(Screen):
             log.debug("_on_threads_loaded: populate complete")
         except Exception as e:
             log.error("_on_threads_loaded: %s\n%s", e, traceback.format_exc())
+        self._scan_invites([t.id for t in threads])
+
+    # ── Calendar invites ────────────────────────────────────────────────────────
+
+    @property
+    def _cal(self) -> CalendarClient:
+        if self._calendar is None:
+            self._calendar = CalendarClient(self.gmail.credentials)
+        return self._calendar
+
+    @work(thread=True, exclusive=True, group="invites", exit_on_error=False)
+    def _scan_invites(self, thread_ids: list[str]) -> None:
+        """Resolve, per visible thread, whether a meeting invite has already
+        been accepted on the calendar, then decorate the accepted ones. The
+        listed-thread metadata carries no attachments, so invites are found via
+        a search and intersected with what's on screen."""
+        worker = get_current_worker()
+        visible = set(thread_ids)
+        if not visible:
+            return
+        try:
+            invite_threads, _ = self.gmail.list_threads(
+                query="filename:ics", max_results=50,
+            )
+        except Exception as e:
+            log.debug("invite scan: list failed: %s", e)
+            return
+        email = self.gmail.email_address
+        # Seed from cache so this view's already-resolved threads keep their mark
+        # (apply replaces the whole set). Empty-string entries are 'resolved, no
+        # decoration' — kept in the cache to avoid re-querying, dropped here.
+        marks = {
+            tid: m for tid, m in self._invite_status.items()
+            if tid in visible and m
+        }
+        for t in invite_threads:
+            if worker.is_cancelled:
+                return
+            if t.id not in visible or t.id in self._invite_status:
+                continue
+            mark = self._resolve_invite(t.id, email)
+            if mark is None:
+                continue  # couldn't resolve — leave uncached so a later scan retries
+            self._invite_status[t.id] = mark
+            if mark:
+                marks[t.id] = mark
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._apply_invites, marks)
+
+    def _resolve_invite(self, thread_id: str, email: str) -> Optional[str]:
+        """Classify a thread's invite into a decoration mark:
+          MARK_CANCELLED  — the .ics is a cancellation (METHOD:CANCEL).
+          MARK_OUTOFSYNC  — an invitation whose calendar event is gone/cancelled.
+          MARK_ACCEPTED / MARK_TENTATIVE / MARK_DECLINED — your response.
+          MARK_PENDING    — awaiting your response (conflicts stashed for preview).
+          None            — couldn't resolve; a later scan should retry."""
+        full = self.gmail.get_thread(thread_id)
+        if full is None:
+            return None
+        for msg in full.messages:
+            att = msg.calendar_attachment
+            if att is None or not att.attachment_id:
+                continue
+            data = self.gmail.get_attachment(msg.id, att.attachment_id)
+            if not data:
+                continue
+            invite = parse_ics(data.decode("utf-8", "replace"))
+            if invite is None:
+                continue
+            self._invite_objs[thread_id] = invite
+            if invite.method == "CANCEL":
+                return MARK_CANCELLED
+            if not invite.uid:
+                return ""
+            try:
+                info = self._cal.lookup(invite.uid, email)
+            except Exception as e:
+                log.debug("invite scan: calendar lookup failed: %s", e)
+                return None
+            mark = disposition_mark(invite.method, info)
+            # Awaiting a response: pre-compute conflicts for the preview.
+            if mark == MARK_PENDING:
+                try:
+                    self._invite_conflicts[thread_id] = self._cal.conflicts(
+                        invite.dtstart, invite.dtend, exclude_uid=invite.uid,
+                    )
+                except Exception as e:
+                    log.debug("invite scan: conflict lookup failed: %s", e)
+                    self._invite_conflicts[thread_id] = []
+            return mark
+        return None
+
+    def _apply_invites(self, marks: dict[str, str]) -> None:
+        try:
+            self.query_one(MessageList).apply_invite_marks(marks)
+        except Exception:
+            pass
+        # If the user is already looking at one of these, surface the banner now.
+        if self._current_thread is not None:
+            self._sync_invite_banner(self._current_thread.id)
+
+    _BANNER_MARKS = (
+        MARK_ACCEPTED, MARK_TENTATIVE, MARK_DECLINED, MARK_CANCELLED,
+        MARK_OUTOFSYNC, MARK_PENDING,
+    )
+
+    def _banner_for(
+        self, thread_id: Optional[str]
+    ) -> tuple[Optional[CalendarInvite], Optional[str], list[Conflict]]:
+        """The (invite, mark, conflicts) to banner for a thread, or empty."""
+        mark = self._invite_status.get(thread_id) if thread_id else None
+        if mark in self._BANNER_MARKS:
+            return (
+                self._invite_objs.get(thread_id),
+                mark,
+                self._invite_conflicts.get(thread_id, []),
+            )
+        return None, None, []
+
+    def _sync_invite_banner(self, thread_id: Optional[str]) -> None:
+        """Tell the preview about the shown thread's invite state, then redraw
+        so the banner appears or clears."""
+        preview = self.query_one(MessagePreview)
+        if preview.set_invite_banner(*self._banner_for(thread_id)):
+            if self._current_message is not None:
+                preview.show_message(self._current_message)
+            elif self._current_thread is not None:
+                preview.show_thread(self._current_thread)
+
+    # ── RSVP (accept / maybe / decline) ──────────────────────────────────────────
+
+    # Marks that represent a real, RSVP-able calendar event (you can set or
+    # change your response). Cancelled/out-of-sync/non-invites are excluded.
+    _RSVP_ABLE = (MARK_PENDING, MARK_ACCEPTED, MARK_TENTATIVE, MARK_DECLINED)
+
+    def action_rsvp_accept(self) -> None:
+        self._rsvp("accepted", MARK_ACCEPTED, "accepted")
+
+    def action_rsvp_maybe(self) -> None:
+        self._rsvp("tentative", MARK_TENTATIVE, "maybe")
+
+    def action_rsvp_decline(self) -> None:
+        self._rsvp("declined", MARK_DECLINED, "declined")
+
+    def _rsvp(self, response: str, new_mark: str, label: str) -> None:
+        thread = self._current_thread
+        if thread is None:
+            return
+        invite = self._invite_objs.get(thread.id)
+        mark = self._invite_status.get(thread.id)
+        if invite is None or not invite.uid or mark not in self._RSVP_ABLE:
+            self.notify("Not a calendar invite you can respond to.", severity="warning")
+            return
+        self.notify(f"RSVP “{label}”…")
+        self._rsvp_worker(thread.id, invite.uid, response, new_mark, label)
+
+    @work(thread=True, group="mutations", exit_on_error=False)
+    def _rsvp_worker(
+        self, thread_id: str, uid: str, response: str, new_mark: str, label: str
+    ) -> None:
+        worker = get_current_worker()
+        try:
+            ok = self._cal.respond_to_event(uid, self.gmail.email_address, response)
+        except Exception as e:
+            log.error("rsvp failed: %s", e)
+            ok = False
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._after_rsvp, thread_id, new_mark, label, ok)
+
+    def _after_rsvp(self, thread_id: str, new_mark: str, label: str, ok: bool) -> None:
+        if not ok:
+            self.notify(f"Couldn't set “{label}” — calendar update failed.",
+                        severity="error")
+            return
+        self._invite_status[thread_id] = new_mark
+        self._invite_conflicts.pop(thread_id, None)  # no longer pending
+        self.query_one(MessageList).apply_invite_marks(self._current_marks())
+        if self._current_thread is not None:
+            self._sync_invite_banner(self._current_thread.id)
+        self.notify(f"Marked “{label}” — organiser notified.", timeout=6)
+
+    def _current_marks(self) -> dict[str, str]:
+        """All loaded threads' invite marks (for re-decorating the list)."""
+        marks: dict[str, str] = {}
+        for t in self._threads:
+            m = self._invite_status.get(t.id)
+            if m:
+                marks[t.id] = m
+        return marks
+
+    def _safe_to_delete_ids(self) -> list[str]:
+        """Loaded threads the calendar has handled (accepted, tentative, declined
+        or cancelled), in list order — the set :cal-clean trashes. Out-of-sync
+        and still-pending invites are deliberately excluded."""
+        return [
+            t.id for t in self._threads
+            if self._invite_status.get(t.id) in SAFE_TO_DELETE_MARKS
+        ]
+
+    def _cal_clean(self, override: bool) -> None:
+        """Trash every calendar email marked safe to delete. The bare command
+        only reports the count; :cal-clean! confirms and performs the delete."""
+        ids = self._safe_to_delete_ids()
+        if not ids:
+            self.notify(
+                "No calendar emails marked safe to delete in this view.",
+                severity="warning",
+            )
+            return
+        if not override:
+            counts = Counter(self._invite_status.get(i) for i in ids)
+            breakdown = ", ".join(
+                f"{counts[m]} {m}" for m in
+                (MARK_ACCEPTED, MARK_TENTATIVE, MARK_DECLINED, MARK_CANCELLED)
+                if counts.get(m)
+            )
+            self.notify(
+                f"{len(ids)} calendar email{'s' if len(ids) != 1 else ''} safe to "
+                f"delete ({breakdown}) — run :cal-clean! to move them to Trash.",
+                timeout=12,
+            )
+            return
+        self.notify(f"Trashing {len(ids)} calendar email{'s' if len(ids) != 1 else ''}…")
+        self._bulk_trash(ids)
+
+    @work(thread=True, group="mutations", exit_on_error=False)
+    def _bulk_trash(self, thread_ids: list[str]) -> None:
+        worker = get_current_worker()
+        done: list[str] = []
+        errors = 0
+        for tid in thread_ids:
+            if worker.is_cancelled:
+                break
+            try:
+                self.gmail.trash(tid)
+                done.append(tid)
+            except Exception as e:
+                log.error("cal-clean: trash failed for %s: %s", tid, e)
+                errors += 1
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._after_bulk_trash, done, errors)
+
+    def _after_bulk_trash(self, thread_ids: list[str], errors: int) -> None:
+        removed = set(thread_ids)
+        if removed:
+            self._current_message = None
+            for tid in removed:
+                self._thread_cache.pop(tid, None)
+                self._invite_status.pop(tid, None)
+                self._invite_objs.pop(tid, None)
+                self._invite_conflicts.pop(tid, None)
+            msg_list = self.query_one(MessageList)
+            cursor_row = msg_list.cursor_row or 0
+            self._threads = [t for t in self._threads if t.id not in removed]
+            msg_list.populate(self._threads, cursor_row=cursor_row)
+            if self._threads:
+                next_thread = self._threads[min(cursor_row, len(self._threads) - 1)]
+                self._current_thread = next_thread
+                self.query_one(MessagePreview).set_invite_banner(*self._banner_for(next_thread.id))
+                self.query_one(MessagePreview).show_thread(next_thread)
+                self._load_full_thread(next_thread.id)
+            else:
+                self._current_thread = None
+                self.query_one(MessagePreview).clear_preview()
+        note = f"Trashed {len(thread_ids)} calendar email{'s' if len(thread_ids) != 1 else ''}"
+        if errors:
+            note += f", {errors} failed"
+        self.notify(note, timeout=6)
+        self._update_status()
+
+    # ── Mutt — the live copilot ───────────────────────────────────────────────
+
+    def _toggle_copilot(self) -> None:
+        panel = self.query_one(CopilotPanel)
+        if panel.is_on:
+            self._copilot_on = False
+            if self._copilot_timer is not None:
+                self._copilot_timer.stop()
+                self._copilot_timer = None
+            panel.stop()
+            self.notify("Mutt is off")
+            return
+        if not self.config.anthropic_api_key:
+            self.notify("ANTHROPIC_API_KEY not set — Mutt needs it.", severity="warning")
+            return
+        if self._copilot is None:
+            self._copilot = CopilotBrain(
+                self.config.anthropic_api_key,
+                self.config.ai_model_fast, self.config.ai_model_smart,
+            )
+        self._copilot_on = True
+        # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
+        # then give an initial digest of the top few threads already sitting here.
+        self._seen_thread_ids = {t.id for t in self._threads}
+        panel.start()
+        self.notify("Mutt is on watch 🐕")
+        self._copilot_triage_batch(self._threads[:5])
+        self._schedule_copilot_poll()
+
+    def _schedule_copilot_poll(self) -> None:
+        if not self._copilot_on:
+            return
+        self._copilot_timer = self.set_timer(
+            copilot_mod.poll_interval(), self._copilot_poll
+        )
+
+    def _copilot_poll(self) -> None:
+        if not self._copilot_on:
+            return
+        self._copilot_fetch()
+        self._schedule_copilot_poll()
+
+    @work(thread=True, exclusive=True, group="copilot-poll", exit_on_error=False)
+    def _copilot_fetch(self) -> None:
+        """Quietly list the inbox to spot new mail — independent of which folder
+        the user is currently viewing."""
+        worker = get_current_worker()
+        try:
+            threads, token = self.gmail.list_threads(
+                label_id="INBOX", max_results=self.config.threads_per_page,
+            )
+        except Exception as e:
+            log.debug("copilot fetch failed: %s", e)
+            return
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._on_copilot_fetch, threads, token)
+
+    def _on_copilot_fetch(self, threads: list[Thread], token: Optional[str]) -> None:
+        new = [t for t in threads if t.id not in self._seen_thread_ids]
+        self._seen_thread_ids |= {t.id for t in threads}
+        if not new:
+            return
+        # Refresh the visible list only when the user is on the inbox AND idle,
+        # so new mail appears without yanking the view mid-navigation.
+        if self._viewing_inbox() and self._is_idle():
+            self._threads = threads
+            self._next_page_token = token
+            cursor = self.query_one(MessageList).cursor_row or 0
+            self.query_one(MessageList).populate(threads, cursor_row=cursor)
+            self._scan_invites([t.id for t in threads])
+        self._copilot_triage_batch(new[:5])
+
+    def _viewing_inbox(self) -> bool:
+        return self._current_label_id == "INBOX" and not self._current_query
+
+    def _is_idle(self) -> bool:
+        return (time.monotonic() - self._last_activity) > 8.0
+
+    def _copilot_calendar_hint(self, thread: Thread) -> str:
+        mark = self._invite_status.get(thread.id)
+        if mark in SAFE_TO_DELETE_MARKS:
+            return f"already handled on your calendar ({mark}) — safe to delete"
+        if mark == MARK_OUTOFSYNC:
+            return "event was cancelled/removed from your calendar"
+        if mark == MARK_PENDING:
+            return "a calendar invite awaiting your RSVP"
+        return ""
+
+    @work(thread=True, exclusive=True, group="copilot-triage", exit_on_error=False)
+    def _copilot_triage_batch(self, threads: list[Thread]) -> None:
+        worker = get_current_worker()
+        rules = _load_rules()
+        for t in threads:
+            if worker.is_cancelled or not self._copilot_on:
+                break
+            self._copilot_word += 1
+            self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
+            hint = self._copilot_calendar_hint(t)
+            try:
+                note = self._copilot.triage(t, rules=rules, calendar_hint=hint)
+            except Exception as e:
+                log.debug("copilot triage failed: %s", e)
+                continue
+            if not worker.is_cancelled:
+                self.app.call_from_thread(self._on_triage_note, note)
+        self.app.call_from_thread(self._copilot_end_thinking)
+
+    def _copilot_begin_thinking(self, word_i: int) -> None:
+        self.query_one(CopilotPanel).begin_thinking(word_i)
+
+    def _copilot_end_thinking(self) -> None:
+        self.query_one(CopilotPanel).end_thinking()
+
+    def _on_triage_note(self, note: "copilot_mod.TriageNote") -> None:
+        self.query_one(CopilotPanel).post_triage(note)
+        # Auto-open only the genuinely urgent, and only when the user is idle.
+        if note.urgency == "high" and self._is_idle():
+            self._open_thread_by_id(note.thread_id)
+
+    def _open_thread_by_id(self, thread_id: str) -> None:
+        ml = self.query_one(MessageList)
+        try:
+            ml.move_cursor(row=ml.get_row_index(thread_id))
+            ml.focus()
+            return
+        except Exception:
+            pass
+        thread = self._thread_cache.get(thread_id)
+        if thread is None:
+            try:
+                thread = self.gmail.get_thread(thread_id)
+            except Exception:
+                thread = None
+        if thread is not None:
+            self._current_thread = thread
+            self.query_one(MessagePreview).set_invite_banner(*self._banner_for(thread_id))
+            self.query_one(MessagePreview).show_thread(thread)
+
+    # ── Chat ─────────────────────────────────────────────────────────────────
+
+    def action_talk_to_mutt(self) -> None:
+        panel = self.query_one(CopilotPanel)
+        if not panel.is_on:
+            self.notify("Mutt is off — :copilot to wake him.", severity="warning")
+            return
+        panel.focus_input()
+
+    def on_copilot_panel_chat_submitted(self, event: CopilotPanel.ChatSubmitted) -> None:
+        self._copilot_chat_worker(event.text)
+        event.stop()
+
+    def _copilot_say(self, message: str) -> None:
+        """':mutt <message>' — talk to Mutt from the command bar, waking him first."""
+        if not self._copilot_on:
+            self._toggle_copilot()
+            if not self._copilot_on:
+                return  # no API key
+        self.query_one(CopilotPanel).post_user(message)
+        self._copilot_chat_worker(message)
+
+    @work(thread=True, exclusive=True, group="copilot-chat", exit_on_error=False)
+    def _copilot_chat_worker(self, text: str) -> None:
+        worker = get_current_worker()
+        self._copilot_word += 1
+        self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
+        convo = list(self._copilot_chat)
+        convo.append({"role": "user", "content": text})
+        ui = lambda action, arg: self.app.call_from_thread(self._apply_copilot_ui, action, arg)
+        emit = lambda t: self.app.call_from_thread(self.query_one(CopilotPanel).post_mutt, t)
+        executor = CopilotExecutor(
+            self.gmail, self._cal, ui, self._threads, rules=_load_rules(),
+        )
+        try:
+            reply = self._copilot.chat(
+                convo, executor, emit,
+                lambda: worker.is_cancelled or not self._copilot_on,
+            )
+        except Exception as e:
+            log.debug("copilot chat failed: %s", e)
+            reply = ""
+        if reply:
+            self._copilot_chat.append({"role": "user", "content": text})
+            self._copilot_chat.append({"role": "assistant", "content": reply})
+            self._copilot_chat = self._copilot_chat[-20:]
+        self.app.call_from_thread(self._copilot_end_thinking)
+
+    def _apply_copilot_ui(self, action: str, arg: str) -> None:
+        """UI tools Mutt fires, run on the main thread."""
+        if action == "open_thread":
+            self._open_thread_by_id(arg)
+        elif action == "run_command":
+            self._run_command(arg)
+
+    def on_key(self, event: events.Key) -> None:
+        # Track activity so Mutt knows when the user is busy (don't grab focus
+        # or yank the view) versus idle (safe to auto-open urgent mail).
+        self._last_activity = time.monotonic()
 
     def _maybe_load_more(self) -> None:
         """Fetch the next page when the cursor reaches the end of the list."""
@@ -360,6 +905,10 @@ class InboxScreen(Screen):
         if new:
             self._threads.extend(new)
             self.query_one(MessageList).append_threads(new)
+            # Pass every loaded id (not just the new page) so the replace in
+            # apply_invite_marks keeps earlier pages' tags; cached threads
+            # are skipped from re-resolving, so this stays cheap.
+            self._scan_invites([t.id for t in self._threads])
         self._update_status()
 
     def _on_load_failed(self, error: str) -> None:
@@ -380,7 +929,10 @@ class InboxScreen(Screen):
         event.stop()
 
     def on_message_list_thread_highlighted(self, event: MessageList.ThreadHighlighted) -> None:
+        self._last_activity = time.monotonic()
         preview = self.query_one(MessagePreview)
+        preview.set_invite_banner(*self._banner_for(event.thread.id))
+        self._current_message = None
         if self._preview_timer is not None:
             self._preview_timer.stop()
             self._preview_timer = None
@@ -403,7 +955,46 @@ class InboxScreen(Screen):
         event.stop()
 
     def on_message_list_thread_selected(self, event: MessageList.ThreadSelected) -> None:
+        self._current_message = None
         self._load_full_thread(event.thread.id, preview_only=False)
+        self.query_one(MessagePreview).focus()
+        event.stop()
+
+    @staticmethod
+    def _message_in(thread: Thread, message: Message) -> Message:
+        """Prefer the thread's own copy of a message — after the full fetch it
+        carries the body, where the listed (metadata) copy has only headers."""
+        return next((m for m in thread.messages if m.id == message.id), message)
+
+    def on_message_list_message_highlighted(
+        self, event: MessageList.MessageHighlighted
+    ) -> None:
+        preview = self.query_one(MessagePreview)
+        if self._preview_timer is not None:
+            self._preview_timer.stop()
+            self._preview_timer = None
+        cached = self._thread_cache.get(event.thread.id)
+        thread = cached if cached is not None else event.thread
+        self._current_thread = thread
+        self._current_message = self._message_in(thread, event.message)
+        preview.set_invite_banner(*self._banner_for(event.thread.id))
+        preview.show_message(self._current_message)
+        if cached is None:
+            thread_id = event.thread.id
+            self._preview_timer = self.set_timer(
+                0.2, lambda: self._load_full_thread(thread_id)
+            )
+        if self._threads and event.thread.id == self._threads[-1].id:
+            self._maybe_load_more()
+        self._update_status()
+        event.stop()
+
+    def on_message_list_message_selected(
+        self, event: MessageList.MessageSelected
+    ) -> None:
+        self._current_message = event.message
+        self._load_full_thread(event.thread.id, preview_only=False)
+        self.query_one(MessagePreview).focus()
         event.stop()
 
     def on_command_bar_command_submitted(self, event: CommandBar.CommandSubmitted) -> None:
@@ -440,7 +1031,15 @@ class InboxScreen(Screen):
         if self._current_thread and self._current_thread.id != thread.id:
             return  # cursor moved on while this fetch was in flight
         self._current_thread = thread
-        self.query_one(MessagePreview).show_thread(thread)
+        preview = self.query_one(MessagePreview)
+        preview.set_invite_banner(*self._banner_for(thread.id))
+        if self._current_message is not None:
+            # Cursor is on a message row: swap in the full-bodied copy of
+            # that message and keep the preview focused on it.
+            self._current_message = self._message_in(thread, self._current_message)
+            preview.show_message(self._current_message)
+        else:
+            preview.show_thread(thread)
         if thread.is_unread and not preview_only:
             self._mark_read_background(thread.id)
             self._apply_local_label_change(thread.id, "mark_read")
@@ -462,15 +1061,19 @@ class InboxScreen(Screen):
 
     def action_reply(self) -> None:
         if self._current_thread:
-            self._compose_reply(self._current_thread, reply_all=False)
+            self._compose_reply(
+                self._current_thread, reply_all=False, message=self._current_message
+            )
 
     def action_reply_all(self) -> None:
         if self._current_thread:
-            self._compose_reply(self._current_thread, reply_all=True)
+            self._compose_reply(
+                self._current_thread, reply_all=True, message=self._current_message
+            )
 
     def action_forward(self) -> None:
         if self._current_thread:
-            self._compose_forward(self._current_thread)
+            self._compose_forward(self._current_thread, message=self._current_message)
 
     def action_compose(self) -> None:
         self._compose_new()
@@ -522,9 +1125,11 @@ class InboxScreen(Screen):
     def _suggest_move_worker(self, thread: Thread) -> None:
         worker = get_current_worker()
         user_labels = [l for l in self._labels if l.type == "user"]
+        tips = load_tips()
         try:
             answer = self._ai.suggest_label(
-                thread, [l.name for l in user_labels], rules=_load_rules()
+                thread, [l.name for l in user_labels], rules=_load_rules(),
+                tips=tips.content if tips else "",
             )
         except Exception as e:
             log.debug("move suggestion failed: %s", e)
@@ -619,6 +1224,7 @@ class InboxScreen(Screen):
     def _after_mutation(self, thread_id: str, op: str, note: str = "") -> None:
         destructive = op in ("archive", "trash", "move")
         if destructive:
+            self._current_message = None
             self._thread_cache.pop(thread_id, None)
             msg_list = self.query_one(MessageList)
             cursor_row = msg_list.cursor_row or 0
@@ -642,20 +1248,29 @@ class InboxScreen(Screen):
 
     # ── Compose ────────────────────────────────────────────────────────────────
 
-    def _compose_reply(self, thread: Thread, reply_all: bool = False) -> None:
+    def _compose_reply(
+        self, thread: Thread, reply_all: bool = False,
+        message: Optional[Message] = None,
+    ) -> None:
         draft = build_reply_draft(thread, reply_all=reply_all,
-                                  my_address=self.gmail.email_address)
-        self._open_editor_and_send(draft, thread)
+                                  my_address=self.gmail.email_address,
+                                  message=message)
+        self._open_editor_and_send(draft, thread, reply_to=message)
 
-    def _compose_forward(self, thread: Thread) -> None:
-        draft = build_forward_draft(thread)
+    def _compose_forward(self, thread: Thread, message: Optional[Message] = None) -> None:
+        draft = build_forward_draft(thread, message=message)
         self._open_editor_and_send(draft, thread=None)
 
     def _compose_new(self) -> None:
         draft = build_new_draft()
         self._open_editor_and_send(draft, thread=None)
 
-    def _open_editor_and_send(self, draft: str, thread: Optional[Thread]) -> None:
+    def _open_editor_and_send(
+        self, draft: str, thread: Optional[Thread],
+        reply_to: Optional[Message] = None,
+    ) -> None:
+        """`reply_to` pins the In-Reply-To/References headers to a specific
+        message (mid-thread reply); default is the thread's newest message."""
         editor = self.config.editor
         with self.app.suspend():
             content = launch_editor(draft, editor)
@@ -666,13 +1281,14 @@ class InboxScreen(Screen):
             self.notify("Compose cancelled (empty To or body)", severity="warning")
             return
         if self.config.safe_mode:
-            self._save_draft_worker(to, cc, subject, body, thread)
+            self._save_draft_worker(to, cc, subject, body, thread, reply_to)
         else:
-            self._send_worker(to, cc, subject, body, thread)
+            self._send_worker(to, cc, subject, body, thread, reply_to)
 
     @work(thread=True, group="send", exit_on_error=False)
     def _save_draft_worker(
-        self, to: str, cc: str, subject: str, body: str, thread: Optional[Thread]
+        self, to: str, cc: str, subject: str, body: str, thread: Optional[Thread],
+        reply_to: Optional[Message] = None,
     ) -> None:
         worker = get_current_worker()
         try:
@@ -682,7 +1298,7 @@ class InboxScreen(Screen):
                 subject=subject,
                 body=body,
                 from_address=self.gmail.email_address,
-                reply_to_message=thread.last_message if thread else None,
+                reply_to_message=reply_to or (thread.last_message if thread else None),
                 thread_id=thread.id if thread else None,
             )
         except Exception as e:
@@ -698,7 +1314,8 @@ class InboxScreen(Screen):
 
     @work(thread=True, group="send", exit_on_error=False)
     def _send_worker(
-        self, to: str, cc: str, subject: str, body: str, thread: Optional[Thread]
+        self, to: str, cc: str, subject: str, body: str, thread: Optional[Thread],
+        reply_to: Optional[Message] = None,
     ) -> None:
         worker = get_current_worker()
         try:
@@ -708,7 +1325,7 @@ class InboxScreen(Screen):
                 subject=subject,
                 body=body,
                 from_address=self.gmail.email_address,
-                reply_to_message=thread.last_message if thread else None,
+                reply_to_message=reply_to or (thread.last_message if thread else None),
                 thread_id=thread.id if thread else None,
             )
         except Exception as e:
@@ -743,11 +1360,27 @@ class InboxScreen(Screen):
         if cmd in ("move", "mv"):
             self._do_move(arg)
             return
-        if cmd == "sort":
-            self._start_agent("Sorting inbox", _sort_goal(arg))
+        if cmd in ("sort", "sort!"):
+            tips, proceed = self._gated_tips("sort", override=cmd.endswith("!"))
+            if proceed:
+                self._start_agent("Sorting inbox", _sort_goal(arg, tips=tips))
             return
-        if cmd == "zero":
-            self._start_agent("Inbox zero", _zero_goal(arg))
+        if cmd in ("zero", "zero!"):
+            tips, proceed = self._gated_tips("zero", override=cmd.endswith("!"))
+            if proceed:
+                self._start_agent("Inbox zero", _zero_goal(arg, tips=tips))
+            return
+        if cmd == "tips":
+            self._start_agent("Learning folders", _tips_goal())
+            return
+        if cmd in ("cal-clean", "cal-clean!"):
+            self._cal_clean(override=cmd.endswith("!"))
+            return
+        if cmd in ("copilot", "mutt"):
+            if arg.strip():
+                self._copilot_say(arg.strip())   # ":mutt <message>" one-liner
+            else:
+                self._toggle_copilot()
             return
         if cmd == "agent":
             if not arg:
@@ -764,17 +1397,42 @@ class InboxScreen(Screen):
         if cmd == "triage":
             self._ai_command("triage")
             return
-        if cmd == "reply-draft":
+        if cmd in ("reply-draft", "draft-reply", "rd"):
             self._ai_command("reply_draft", arg or "professional")
             return
         if cmd == "explain":
             self._ai_command("explain")
             return
-        # Free-form command against current thread
-        if self._current_thread:
-            self._ai_command("custom", raw)
-        else:
-            self.notify(f"Unknown command: {cmd}", severity="warning")
+        if cmd in ("ai", "ask"):
+            if not arg:
+                self.notify("Usage: ai <instruction>", severity="warning")
+                return
+            self._ai_command("custom", arg)
+            return
+        # Unknown command — report it and reopen the (cleared) bar to retry,
+        # rather than silently running it as a free-form AI prompt.
+        self.notify(f"Unknown command: :{cmd}", severity="warning")
+        self.action_command_mode()
+
+    def _gated_tips(self, cmd: str, override: bool) -> tuple[Optional[Tips], bool]:
+        """Load folder tips for an agent run. Returns (tips, proceed): stale
+        tips block the run unless overridden with :<cmd>!."""
+        tips = load_tips()
+        if tips is not None and tips.is_stale() and not override:
+            age = tips.age_days()
+            age_str = f"{age} days old" if age is not None else "undated"
+            self.notify(
+                f"Folder tips are {age_str} — run :tips to refresh them, "
+                f"or :{cmd}! to continue with the stale tips.",
+                severity="warning", timeout=10,
+            )
+            return None, False
+        if tips is None:
+            self.notify(
+                "Tip: run :tips once to record your folders — future "
+                "runs skip the folder scan.", timeout=8,
+            )
+        return tips, True
 
     def _do_move(self, label_name: str) -> None:
         label_name = label_name.strip()
@@ -855,29 +1513,55 @@ class InboxScreen(Screen):
             "custom": f": {arg}",
         }
         is_reply = cmd == "reply_draft"
+        # Capture the selected message now: when the cursor is on an earlier
+        # message in an expanded thread, the reply targets that message's sender
+        # (Mutt-style), not the newest message in the thread.
+        target = self._current_message if is_reply else None
         panel = AIPanel(
             title=f"AI — {title_map.get(cmd, cmd)}",
-            work_fn=lambda p: self._run_ai_worker(p, cmd, thread, arg),
+            work_fn=lambda p: self._run_ai_worker(p, cmd, thread, arg, target),
             confirm_label="Open as reply in editor?" if is_reply else None,
             confirm_fn=(
-                (lambda p: self._open_ai_reply(thread, p)) if is_reply else None
+                (lambda p: self._open_ai_reply(thread, p, target)) if is_reply else None
             ),
         )
         self.app.push_screen(panel)
 
-    def _open_ai_reply(self, thread: Thread, panel: AIPanel) -> None:
+    def _get_voice_samples(self) -> list[str]:
+        """A few de-quoted Sent-folder messages as writing-voice samples, fetched
+        once per session. Best-effort — never blocks drafting."""
+        if self._voice_samples is None:
+            try:
+                self._voice_samples = self.gmail.recent_sent_replies(limit=3)
+            except Exception as e:
+                log.debug("voice samples fetch failed: %s", e)
+                self._voice_samples = []
+        return self._voice_samples
+
+    def _open_ai_reply(
+        self, thread: Thread, panel: AIPanel, target: Optional[Message] = None
+    ) -> None:
         body = panel.full_text.strip()
         if not body:
             return
-        draft = build_reply_draft(
-            thread, my_address=self.gmail.email_address, body=body
+        # Prepend a disclaimer the editor shows but parse_draft strips before
+        # sending, so the recipient never sees it.
+        note = (
+            f"{AI_DRAFT_MARKER} First draft by {model_label(self.config.ai_model_smart)}"
+            " — review & edit before sending; this line is removed automatically."
         )
-        # Let the modal finish closing before suspending for the editor
-        self.call_after_refresh(self._open_editor_and_send, draft, thread)
+        draft = build_reply_draft(
+            thread, my_address=self.gmail.email_address,
+            body=f"{note}\n\n{body}", message=target,
+        )
+        # Let the modal finish closing before suspending for the editor. Pass the
+        # target so the In-Reply-To/References headers point at the right message.
+        self.call_after_refresh(self._open_editor_and_send, draft, thread, target)
 
     @work(thread=True, group="ai", exit_on_error=False)
     def _run_ai_worker(
-        self, panel: AIPanel, cmd: str, thread: Optional[Thread], arg: str
+        self, panel: AIPanel, cmd: str, thread: Optional[Thread], arg: str,
+        target: Optional[Message] = None,
     ) -> None:
         worker = get_current_worker()
         try:
@@ -885,7 +1569,13 @@ class InboxScreen(Screen):
             if cmd == "summarise":
                 gen = ai.summarise(thread)
             elif cmd == "reply_draft":
-                gen = ai.reply_draft(thread, tone=arg or "professional")
+                gen = ai.reply_draft(
+                    thread, tone=arg or "professional", target=target,
+                    voice=self.config.voice_notes,
+                    signature=self.config.signature,
+                    samples=self._get_voice_samples(),
+                    rules=_load_rules(),
+                )
             elif cmd == "explain":
                 gen = ai.explain(thread)
             else:
@@ -989,7 +1679,9 @@ class InboxScreen(Screen):
         if result is not None and not worker.is_cancelled:
             log.debug("agent finished: %d turns, %d plan actions",
                       result.turns, len(result.plan))
-            self.app.call_from_thread(panel.show_result, result.summary, result.plan)
+            self.app.call_from_thread(
+                panel.show_result, result.summary, result.plan, result.warning
+            )
 
     def on_agent_panel_plan_confirmed(self, event: AgentPanel.PlanConfirmed) -> None:
         panel = self.query_one(AgentPanel)
@@ -1110,7 +1802,13 @@ class InboxScreen(Screen):
         total = len(self._threads)
         unread = sum(1 for t in self._threads if t.is_unread)
         msg_list = self.query_one(MessageList)
-        idx = (msg_list.cursor_row or 0) + 1
+        # With expanded threads, table rows outnumber threads — count by the
+        # highlighted thread, not the cursor row.
+        current_id = self._current_thread.id if self._current_thread else None
+        idx = next(
+            (i + 1 for i, t in enumerate(self._threads) if t.id == current_id),
+            (msg_list.cursor_row or 0) + 1,
+        )
 
         safe_indicator = " [SAFE]" if self.config.safe_mode else ""
         ai_indicator = " [AI]" if self._ai else ""

@@ -125,3 +125,22 @@ async def test_user_can_replace_suggestion():
         await pilot.press("enter")
         await pilot.pause()
         assert app.submitted == ["move Travel"]
+
+
+class TestSuggestLabelTips:
+    def test_tips_included_when_present(self, make_message):
+        helper = TestSuggestLabel()
+        a, captured = helper._assistant_returning("Finance")
+        a.suggest_label(
+            helper._thread(make_message), ["Finance"],
+            tips="## Finance\n- companies: Xero",
+        )
+        prompt = captured["messages"][0]["content"]
+        assert "What lives in each folder" in prompt
+        assert "- companies: Xero" in prompt
+
+    def test_no_tips_section_when_absent(self, make_message):
+        helper = TestSuggestLabel()
+        a, captured = helper._assistant_returning("Finance")
+        a.suggest_label(helper._thread(make_message), ["Finance"])
+        assert "What lives in each folder" not in captured["messages"][0]["content"]

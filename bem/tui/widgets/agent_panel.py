@@ -147,11 +147,18 @@ class AgentPanel(Vertical):
         elif kind == "error":
             self._log.write(Text(f"✗ {event[1]}", style="bold red"))
 
-    def show_result(self, summary: str, plan: list[PlanAction]) -> None:
+    def show_result(
+        self, summary: str, plan: list[PlanAction], warning: str = ""
+    ) -> None:
         if not self.is_mounted:
             return
         self.plan = plan
         log = self._log
+        if warning:
+            # Early-stop reasons are synthesized, never streamed — show them,
+            # or the run looks like it just stopped mid-tool-call.
+            log.write(Text(""))
+            log.write(Text(f"⚠ {warning}", style="bold yellow"))
         if plan:
             log.write(Text(""))
             log.write(Text(f"Plan — {len(plan)} action{'s' if len(plan) != 1 else ''}",
@@ -189,7 +196,11 @@ class AgentPanel(Vertical):
             self._footer(f"{apply_hint}   n/Esc discard   j/k scroll")
         else:
             self.state = "done"
-            self.query_one("#agent-title", Label).update("✓ Done — nothing to apply")
+            title = (
+                "⚠ Stopped early — nothing was queued"
+                if warning else "✓ Done — nothing to apply"
+            )
+            self.query_one("#agent-title", Label).update(title)
             self._footer("Esc close")
 
     def begin_apply(self) -> None:

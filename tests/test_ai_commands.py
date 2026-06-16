@@ -44,3 +44,79 @@ def test_thread_to_text_includes_all_messages(make_message, make_thread):
     text = _thread_to_text(thread)
     assert "first message" in text
     assert "second message" in text
+
+
+def _capture_reply_prompt(make_thread, make_message, target):
+    """Run reply_draft with _stream stubbed, returning the prompt it built."""
+    from bem.ai.commands import AIAssistant
+    ai = AIAssistant.__new__(AIAssistant)  # skip __init__ (no anthropic client needed)
+    ai._model_smart = "test-model"
+    captured = {}
+
+    def fake_stream(prompt, model):
+        captured["prompt"] = prompt
+        return iter(())
+
+    ai._stream = fake_stream
+    thread = make_thread(
+        make_message(id="m1", from_name="Jeejee", from_address="jeejeeu@gmail.com",
+                     body_plain="my CV"),
+        make_message(id="m2", from_name="Ben", from_address="ben@bilue.com.au",
+                     body_plain="fwd to cam"),
+    )
+    list(ai.reply_draft(thread, target=target))
+    return captured["prompt"]
+
+
+def test_reply_draft_targets_selected_message(make_thread, make_message):
+    target = make_message(from_name="Jeejee", from_address="jeejeeu@gmail.com")
+    prompt = _capture_reply_prompt(make_thread, make_message, target)
+    assert "jeejeeu@gmail.com" in prompt
+    assert "not the most recent" in prompt
+
+
+def test_reply_draft_without_target_has_no_focus(make_thread, make_message):
+    prompt = _capture_reply_prompt(make_thread, make_message, target=None)
+    assert "not the most recent" not in prompt
+
+
+def _capture_voice_prompt(make_thread, make_message, **kw):
+    from bem.ai.commands import AIAssistant
+    ai = AIAssistant.__new__(AIAssistant)
+    ai._model_smart = "test-model"
+    captured = {}
+    ai._stream = lambda prompt, model: (captured.__setitem__("p", prompt), iter(()))[1]
+    thread = make_thread(make_message(id="m1", body_plain="hi"))
+    list(ai.reply_draft(thread, **kw))
+    return captured["p"]
+
+
+def test_reply_draft_injects_voice_signature_rules(make_thread, make_message):
+    prompt = _capture_voice_prompt(
+        make_thread, make_message,
+        voice="Warm, concise, Australian.",
+        signature="Ben Moir\nCTO",
+        samples=["Hi Jackie, thanks for the clear next steps."],
+        rules="Politely defer cold partnership pitches.",
+    )
+    assert "Warm, concise, Australian." in prompt          # voice
+    assert "Ben Moir\nCTO" in prompt                         # signature
+    assert "thanks for the clear next steps" in prompt       # sample
+    assert "Politely defer cold partnership" in prompt       # rules
+    assert "[bracketed placeholder]" in prompt               # no-fabrication guard
+
+
+def test_reply_draft_skips_placeholder_rules_text(make_thread, make_message):
+    # The _load_rules "none yet" sentinel must not be injected as a real rule.
+    prompt = _capture_voice_prompt(
+        make_thread, make_message,
+        rules="(none yet — the user has not recorded any rules)",
+    )
+    assert "none yet" not in prompt
+    assert "Standing rules" not in prompt
+
+
+def test_model_label():
+    from bem.ai.commands import model_label
+    assert model_label("claude-sonnet-4-6") == "Claude Sonnet 4.6"
+    assert model_label("some-future-model") == "some-future-model"

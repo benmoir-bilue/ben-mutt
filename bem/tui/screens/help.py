@@ -12,7 +12,11 @@ BINDINGS_TABLE = [
     ("j / k",       "Next / prev thread",           "Index"),
     ("gg",          "First thread",                  "Index"),
     ("G",           "Last thread",                   "Index"),
-    ("r",           "Reply",                         "Index"),
+    ("v",           "Expand / collapse thread",      "Index"),
+    ("V",           "Expand / collapse all threads", "Index"),
+    ("P",           "Jump to parent message",        "Index"),
+    ("Enter",       "Open thread + focus preview",   "Index"),
+    ("r",           "Reply (to selected message)",   "Index"),
     ("R",           "Reply all",                     "Index"),
     ("f",           "Forward",                       "Index"),
     ("m",           "Compose new",                   "Index"),
@@ -33,12 +37,22 @@ BINDINGS_TABLE = [
     ("K",           "Prev thread",                   "Pager"),
     (":summarise",  "Summarise selected thread",     "AI"),
     (":triage",     "Triage inbox by priority",      "AI"),
-    (":reply-draft [tone]", "Draft a reply",         "AI"),
+    (":reply-draft, :rd [tone]", "Draft a reply",    "AI"),
     (":explain",    "Explain selected thread",       "AI"),
+    (":ai <prompt>", "Free-form prompt on thread",    "AI"),
+    (":tips",       "Agent: scan folders, save tips", "Agent"),
     (":sort [hint]", "Agent: file inbox into folders", "Agent"),
+    (":sort!",      "Sort even if tips are stale",   "Agent"),
     (":zero [hint]", "Agent: file, archive + draft replies", "Agent"),
+    (":zero!",      "Zero even if tips are stale",   "Agent"),
     (":agent <goal>", "Agent: free-form goal",       "Agent"),
     (":rule <text>", "Save a standing filing rule",  "Agent"),
+    (":copilot / :mutt", "Toggle Mutt, the live inbox copilot", "Copilot"),
+    (":mutt <message>", "Ask Mutt something",          "Copilot"),
+    ("t",            "Talk to Mutt (focus chat)",     "Copilot"),
+    ("A / M / X",    "Invite: accept / maybe / decline", "Calendar"),
+    (":cal-clean",   "Count calendar emails safe to delete", "Calendar"),
+    (":cal-clean!",  "Trash handled invites (✓ ~ ⊘ ✗)", "Calendar"),
     (":move <label>", "Move thread (creates label)", "General"),
     (":search <q>", "Search Gmail",                  "General"),
     ("?",           "This help",                     "General"),
@@ -88,7 +102,7 @@ class HelpScreen(ModalScreen):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_column("Key", width=24)
+        table.add_column("Key", width=26)
         table.add_column("Action", width=28)
         table.add_column("Context", width=10)
         for key, action, ctx in BINDINGS_TABLE:

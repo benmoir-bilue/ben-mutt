@@ -7,6 +7,7 @@ A confused or buggy agent run therefore costs nothing.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 
 MAX_SEARCH_RESULTS = 50
 MAX_BODY_CHARS = 2500
+TRANSIENT_RETRIES = 2
+RETRY_BASE_DELAY = 1.0  # seconds; grows linearly per attempt
 
 AGENT_TOOLS: list[dict] = [
     {
@@ -115,6 +118,31 @@ AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "save_folder_tips",
+        "description": (
+            "Save the folder-tips knowledge file: per-folder notes on the "
+            "people, companies and topics found there. Future sorting runs "
+            "read this file instead of re-scanning every folder. Writes a "
+            "local file immediately — nothing touches the mailbox. Call it "
+            "ONCE, with notes for every folder, as markdown sections:\n"
+            "## <Label name>\n"
+            "- people: <names / addresses seen here>\n"
+            "- companies: <senders, domains>\n"
+            "- topics: <what material is discussed>"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tips": {
+                    "type": "string",
+                    "description": "The complete tips document, one section per folder",
+                },
+            },
+            "required": ["tips"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "draft_reply",
         "description": (
             "Queue a reply draft for a thread. You MUST call get_thread on "
@@ -175,16 +203,25 @@ class ToolExecutor:
         self._full: set[str] = set()  # thread ids fetched in full via get_thread
 
     def execute(self, name: str, args: dict) -> tuple[str, bool]:
-        """Run one tool call. Returns (result_text, is_error)."""
-        try:
-            handler = getattr(self, f"_tool_{name}", None)
-            if handler is None:
-                return f"Unknown tool: {name}", True
-            return handler(**args)
-        except TypeError as e:
-            return f"Bad arguments for {name}: {e}", True
-        except Exception as e:
-            return f"{type(e).__name__}: {e}", True
+        """Run one tool call. Returns (result_text, is_error).
+
+        Transient network failures (socket errors, rate limiting) are retried
+        with a short backoff rather than burning an agent turn on the error.
+        """
+        handler = getattr(self, f"_tool_{name}", None)
+        if handler is None:
+            return f"Unknown tool: {name}", True
+        for attempt in range(TRANSIENT_RETRIES + 1):
+            try:
+                return handler(**args)
+            except TypeError as e:
+                return f"Bad arguments for {name}: {e}", True
+            except Exception as e:
+                if attempt < TRANSIENT_RETRIES and _is_transient(e):
+                    time.sleep(RETRY_BASE_DELAY * (attempt + 1))
+                    continue
+                return f"{type(e).__name__}: {e}", True
+        return f"{name} failed after retries", True  # unreachable
 
     # ── Read-only ──────────────────────────────────────────────────────────
 
@@ -224,6 +261,13 @@ class ToolExecutor:
             parts.append(f"--- {msg.display_from} ({date}) ---")
             parts.append(msg.body[:MAX_BODY_CHARS])
         return "\n".join(parts), False
+
+    def _tool_save_folder_tips(self, tips: str) -> tuple[str, bool]:
+        from bem.ai.tips import save_tips
+        if not tips.strip():
+            return "tips must not be empty", True
+        save_tips(tips)
+        return "folder tips saved", False
 
     # ── Deferred mutations ─────────────────────────────────────────────────
 
@@ -293,3 +337,15 @@ class ToolExecutor:
             a for a in self.plan
             if not (a.thread_id == thread_id and a.kind in kinds)
         ]
+
+
+def _is_transient(e: Exception) -> bool:
+    """Errors worth retrying: socket-level failures (e.g. macOS EADDRNOTAVAIL
+    under connection bursts) and Gmail rate-limit / server errors."""
+    try:
+        from googleapiclient.errors import HttpError
+        if isinstance(e, HttpError):
+            return getattr(e.resp, "status", 0) in (429, 500, 502, 503, 504)
+    except ImportError:
+        pass
+    return isinstance(e, OSError)

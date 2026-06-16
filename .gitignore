@@ -19,3 +19,6 @@ credentials.json
 *.swo
 
 .claude/
+
+# graphify knowledge-graph artifacts
+graphify-out/
