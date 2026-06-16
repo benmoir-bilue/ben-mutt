@@ -122,3 +122,67 @@ class TestParseDraft:
     def test_empty_to_returned_as_empty(self):
         to, cc, subject, body = parse_draft("To: \nCc: \nSubject: s\n\nbody")
         assert to == ""
+
+    def test_ai_draft_disclaimer_stripped(self):
+        content = (
+            "To: a@x.com\nSubject: Re: hi\n\n"
+            "[ai-draft] First draft by Claude Sonnet 4.6 — review before sending.\n\n"
+            "Hi Alice,\nThanks for your note.\nBen"
+        )
+        to, cc, subject, body = parse_draft(content)
+        assert "[ai-draft]" not in body
+        assert "First draft by" not in body
+        assert body.startswith("Hi Alice,")
+        assert body.endswith("Ben")
+
+
+class TestReplyToSpecificMessage:
+    """Mutt-style mid-thread replies: r on a message row targets that
+    message, not the newest one."""
+
+    def _two_message_thread(self, make_thread, make_message):
+        first = make_message(
+            id="m1", from_name="Alice Smith", from_address="alice@example.com",
+            body_plain="original question",
+        )
+        second = make_message(
+            id="m2", from_name="Bob Jones", from_address="bob@example.com",
+            subject="Re: Quarterly report", body_plain="latest reply",
+        )
+        return first, second, make_thread(first, second)
+
+    def test_reply_targets_given_message(self, make_thread, make_message):
+        first, _, thread = self._two_message_thread(make_thread, make_message)
+        draft = build_reply_draft(thread, my_address=MY_ADDRESS, message=first)
+        h = _headers(draft)
+        assert h["to"] == "alice@example.com"
+        assert "> original question" in draft
+
+    def test_default_still_targets_newest_message(self, make_thread, make_message):
+        _, _, thread = self._two_message_thread(make_thread, make_message)
+        h = _headers(build_reply_draft(thread, my_address=MY_ADDRESS))
+        assert h["to"] == "bob@example.com"
+
+    def test_reply_all_uses_target_message_recipients(self, make_thread, make_message):
+        first = make_message(
+            id="m1", from_address="alice@example.com",
+            to=["ben@example.com"], cc=["erin@example.com"],
+        )
+        second = make_message(
+            id="m2", from_address="bob@example.com",
+            to=["ben@example.com"], cc=["frank@example.com"],
+        )
+        thread = make_thread(first, second)
+        draft = build_reply_draft(
+            thread, reply_all=True, my_address=MY_ADDRESS, message=first
+        )
+        h = _headers(draft)
+        assert h["to"] == "alice@example.com"
+        assert h["cc"] == "erin@example.com"
+
+    def test_forward_targets_given_message(self, make_thread, make_message):
+        first, _, thread = self._two_message_thread(make_thread, make_message)
+        draft = build_forward_draft(thread, message=first)
+        assert "alice@example.com" in draft
+        assert "original question" in draft
+        assert "latest reply" not in draft

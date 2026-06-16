@@ -25,10 +25,12 @@ def build_reply_draft(
     reply_all: bool = False,
     my_address: str = "",
     body: str = "",
+    message: Optional[Message] = None,
 ) -> str:
     """Build a reply draft. `body` pre-fills the reply text (e.g. an AI draft)
-    above the quoted original."""
-    last = thread.last_message
+    above the quoted original. `message` targets a specific message in the
+    thread (Mutt-style mid-thread reply); default is the newest message."""
+    last = message or thread.last_message
     if not last:
         return COMPOSE_TEMPLATE.format(to="", cc="", subject="", body_prefix="")
 
@@ -65,8 +67,8 @@ def build_reply_draft(
     )
 
 
-def build_forward_draft(thread: Thread) -> str:
-    last = thread.last_message
+def build_forward_draft(thread: Thread, message: Optional[Message] = None) -> str:
+    last = message or thread.last_message
     if not last:
         return COMPOSE_TEMPLATE.format(to="", cc="", subject="", body_prefix="")
 
@@ -130,6 +132,11 @@ def launch_editor(
             pass
 
 
+# Lines beginning with this marker are bem's own notes (e.g. the AI-draft
+# disclaimer) — shown in the editor but stripped before the email is sent.
+AI_DRAFT_MARKER = "[ai-draft]"
+
+
 def parse_draft(content: str) -> tuple[str, str, str, str]:
     """Parse an edited draft file into (to, cc, subject, body)."""
     lines = content.splitlines()
@@ -147,7 +154,11 @@ def parse_draft(content: str) -> tuple[str, str, str, str]:
             body_start = i
             break
 
-    body = "\n".join(lines[body_start:]).strip()
+    body_lines = [
+        ln for ln in lines[body_start:]
+        if not ln.lstrip().lower().startswith(AI_DRAFT_MARKER)
+    ]
+    body = "\n".join(body_lines).strip()
     return (
         headers.get("to", ""),
         headers.get("cc", ""),

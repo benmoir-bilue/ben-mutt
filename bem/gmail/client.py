@@ -30,6 +30,11 @@ class GmailClient:
         self._user = "me"
         self._profile: dict = {}
 
+    @property
+    def credentials(self) -> Credentials:
+        """The OAuth credentials, shared with sibling clients (e.g. Calendar)."""
+        return self._credentials
+
     def _svc(self):
         if not hasattr(self._local, "service"):
             http = AuthorizedHttp(
@@ -73,15 +78,17 @@ class GmailClient:
         batch.execute()
 
         labels = []
-        for d in details:
-            if d:
-                labels.append(Label(
-                    id=d["id"],
-                    name=d["name"],
-                    type=d.get("type", "user"),
-                    messages_total=d.get("messagesTotal", 0),
-                    messages_unread=d.get("messagesUnread", 0),
-                ))
+        for raw, d in zip(raw_labels, details):
+            # The batch can partially fail (rate limiting); fall back to the
+            # list() entry so the folder still appears, just without counts.
+            d = d or raw
+            labels.append(Label(
+                id=d["id"],
+                name=d["name"],
+                type=d.get("type", "user"),
+                messages_total=d.get("messagesTotal", 0),
+                messages_unread=d.get("messagesUnread", 0),
+            ))
         return sorted(labels, key=lambda l: l.sort_key)
 
     def create_label(self, name: str) -> Label:
@@ -155,6 +162,48 @@ class GmailClient:
             return parse_thread(raw)
         except HttpError:
             return None
+
+    def recent_sent_replies(self, limit: int = 3, max_scan: int = 8) -> list[str]:
+        """A few of the user's own recent Sent messages, de-quoted — few-shot
+        writing-voice samples for AI reply drafts. Best-effort; returns [] on
+        any failure so drafting never blocks on it."""
+        from .models import dequote_reply
+        try:
+            threads, _ = self.list_threads(label_id="SENT", max_results=max_scan)
+        except HttpError:
+            return []
+        me = self.email_address.lower()
+        out: list[str] = []
+        for t in threads:
+            full = self.get_thread(t.id)
+            if full is None:
+                continue
+            mine = [m for m in full.messages if m.from_address.lower() == me]
+            if not mine:
+                continue
+            text = dequote_reply(mine[-1].body)
+            if len(text) >= 40:
+                out.append(text[:800])
+            if len(out) >= limit:
+                break
+        return out
+
+    def get_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        """Fetch and decode an attachment's bytes. Small attachments arrive
+        inline (no attachmentId); callers should read those from the part data
+        directly. Returns b'' on failure."""
+        if not attachment_id:
+            return b""
+        try:
+            att = self._svc().users().messages().attachments().get(
+                userId=self._user, messageId=message_id, id=attachment_id,
+            ).execute()
+        except HttpError:
+            return b""
+        data = att.get("data", "")
+        if not data:
+            return b""
+        return base64.urlsafe_b64decode(data + "==")
 
     # ── Send / Reply ───────────────────────────────────────────────────────────
 

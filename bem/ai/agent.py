@@ -17,7 +17,16 @@ if TYPE_CHECKING:
     from bem.gmail import GmailClient
     from bem.gmail.models import Thread
 
-MAX_TURNS = 25
+MAX_TURNS = 40
+# With this many turns left, tell the model to stop exploring and queue its
+# actions — otherwise a thorough run reads threads right up to the cap and
+# ends with an empty plan.
+WRAP_UP_AT = 4
+MAX_TOKENS = 4096
+# Thinking shares the output budget: reasoning over a 50-thread inbox can
+# burn 4096 tokens before the first tool call, which truncates the response
+# into a silent no-op turn.
+MAX_TOKENS_THINKING = 16000
 
 AGENT_SYSTEM = """You are the email agent inside bem, a terminal email client.
 You act on the user's Gmail through tools to save them time.
@@ -50,6 +59,7 @@ class AgentResult:
     summary: str = ""
     plan: list[PlanAction] = field(default_factory=list)
     turns: int = 0
+    warning: str = ""  # non-empty when the run stopped early (turn/token limit)
 
 
 def _load_rules() -> str:
@@ -69,6 +79,8 @@ def _arg_summary(name: str, args: dict) -> str:
         return f"{str(args.get('thread_id', ''))[:12]}… → {args.get('label_name', '')}"
     if name == "archive_thread":
         return f"{str(args.get('thread_id', ''))[:12]}…"
+    if name == "save_folder_tips":
+        return f"{len(str(args.get('tips', '')))} chars"
     return ""
 
 
@@ -105,6 +117,7 @@ class EmailAgent:
         messages: list[dict] = [{"role": "user", "content": goal}]
         summary_parts: list[str] = []
         use_thinking = "haiku" not in self._model
+        retried_truncation = False
 
         for turn in range(1, MAX_TURNS + 1):
             if is_cancelled():
@@ -118,6 +131,20 @@ class EmailAgent:
 
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if not tool_uses:
+                if getattr(response, "stop_reason", None) == "max_tokens":
+                    # The output cap cut the response off before any tool
+                    # call — without this check the run ends looking "done".
+                    if not retried_truncation:
+                        retried_truncation = True
+                        emit(("text", "(output hit the token cap — retrying turn)"))
+                        continue
+                    return AgentResult(
+                        summary="\n".join(summary_parts[-3:]),
+                        plan=executor.plan,
+                        turns=turn,
+                        warning="The model kept hitting its output-token cap "
+                                "— the run ended early.",
+                    )
                 return AgentResult(
                     summary="\n".join(summary_parts[-3:]),
                     plan=executor.plan,
@@ -140,32 +167,47 @@ class EmailAgent:
                 if is_error:
                     entry["is_error"] = True
                 results.append(entry)
+            turns_left = MAX_TURNS - turn
+            if turns_left == WRAP_UP_AT:
+                results.append({
+                    "type": "text",
+                    "text": (
+                        f"[bem] Only {turns_left} turns remain before this run "
+                        "is cut off. Stop exploring: queue file_thread/"
+                        "archive_thread now for every thread you already have "
+                        "evidence for, leave the rest untouched, then finish "
+                        "with your summary."
+                    ),
+                })
             messages.append({"role": "user", "content": results})
 
         return AgentResult(
-            summary="Stopped at the turn limit — plan may be incomplete.",
+            summary="\n".join(summary_parts[-3:]),
             plan=executor.plan,
             turns=MAX_TURNS,
+            warning="Stopped at the turn limit — plan may be incomplete.",
         )
 
     def _create(self, system: str, messages: list[dict], use_thinking: bool):
         import anthropic
+        thinking = use_thinking and self._thinking_ok
         kwargs: dict = dict(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=MAX_TOKENS_THINKING if thinking else MAX_TOKENS,
             system=system,
             tools=AGENT_TOOLS,
             messages=messages,
         )
-        if use_thinking and self._thinking_ok:
+        if thinking:
             kwargs["thinking"] = {"type": "adaptive"}
         try:
             return self._client.messages.create(**kwargs)
         except anthropic.BadRequestError:
             if "thinking" not in kwargs:
                 raise
-            # Model/API combination without adaptive thinking — retry plain
-            # and stop sending it for the rest of the run.
+            # Model/API combination without adaptive thinking (or its larger
+            # output cap) — retry plain and stop sending it for this run.
             self._thinking_ok = False
             kwargs.pop("thinking", None)
+            kwargs["max_tokens"] = MAX_TOKENS
             return self._client.messages.create(**kwargs)

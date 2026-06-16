@@ -8,6 +8,7 @@ from bem.gmail.models import (
     _html_to_text,
     _parse_date,
     _strip_html,
+    dequote_reply,
     parse_message,
 )
 
@@ -171,3 +172,101 @@ class TestHtmlToText:
         # blockquote convention lines up with that.
         text = _html_to_text("<blockquote>quoted reply</blockquote>")
         assert "> quoted reply" in text
+
+    def test_head_title_and_office_comments_dropped(self):
+        # Real marketing emails leak <title> and MS Office conditional
+        # comments (<o:PixelsPerInch>96</...>) into the body otherwise.
+        html = (
+            "<head><!--[if gte mso 9]><xml><o:PixelsPerInch>96"
+            "</o:PixelsPerInch></xml><![endif]-->"
+            "<title>Email Template</title>"
+            "<style>body {margin:0}</style></head>"
+            "<body><p>real content</p></body>"
+        )
+        text = _html_to_text(html)
+        assert "real content" in text
+        assert "Email Template" not in text
+        assert "96" not in text
+
+    def test_layout_tables_flattened_to_text(self):
+        # Nested layout tables must not become markdown pipe tables.
+        html = (
+            "<table><tr><td></td><td><table><tr><td>"
+            "<p>hello there</p></td></tr></table></td></tr></table>"
+        )
+        text = _html_to_text(html)
+        assert "hello there" in text
+        assert "|" not in text
+        assert "---|" not in text
+
+    def test_empty_image_links_removed(self):
+        # An <a> wrapping only an <img> leaves a dangling empty link.
+        html = '<a href="https://x.example/click"><img src="logo.png"></a><p>body</p>'
+        text = _html_to_text(html)
+        assert "body" in text
+        assert "https://x.example/click" not in text
+
+    def test_nested_link_button_collapsed(self):
+        html = (
+            '<a href="https://x.example/go">'
+            '<table><tr><td><a href="https://x.example/go">Go now</a>'
+            "</td></tr></table></a>"
+        )
+        text = _html_to_text(html)
+        assert "Go now" in text
+        # The inner link survives; no raw nested [ [..](..) ](..) syntax.
+        assert "] ](" not in text
+
+    def test_whitespace_only_lines_collapsed(self):
+        html = "<p>a</p>" + "<tr><td>   </td></tr>" * 20 + "<p>b</p>"
+        text = _html_to_text(html)
+        assert "\n\n\n" not in text
+
+
+class TestDequoteReply:
+    def test_strips_on_wrote_history(self):
+        body = (
+            "Hi Jackie,\nThanks for the clear next steps.\nBen\n\n"
+            "On Fri, 29 May 2026 at 17:48, Jackie Clark wrote:\n"
+            "> Hey Ben, just checking in..."
+        )
+        out = dequote_reply(body)
+        assert out.startswith("Hi Jackie,")
+        assert out.endswith("Ben")
+        assert "checking in" not in out
+
+    def test_strips_quoted_lines(self):
+        assert dequote_reply("My reply\n> quoted\n> more") == "My reply"
+
+    def test_strips_outlook_from_header(self):
+        body = "Cheers, Ben\nFrom: Someone\nSent: yesterday\n> ..."
+        assert dequote_reply(body) == "Cheers, Ben"
+
+    def test_strips_confidentiality_footer(self):
+        body = "Hi,\nReply text.\nThis e-mail, and any attachment, is confidential."
+        assert dequote_reply(body) == "Hi,\nReply text."
+
+    def test_no_quote_returns_whole_body(self):
+        assert dequote_reply("Just a short note.") == "Just a short note."
+
+
+class TestBodyIsHtml:
+    def _msg(self, plain: str, html_body: str):
+        payload = {"mimeType": "text/plain", "body": {"data": _b64(plain)}} if plain else {}
+        # Build a Message directly via parse_message-style construction.
+        from bem.gmail.models import Message
+        return Message(
+            id="1", thread_id="1", label_ids=[], snippet="snip",
+            date=_parse_date("", "0"), subject="s", from_name="", from_address="",
+            to=[], cc=[], body_plain=plain, body_html=html_body,
+            message_id_header="", in_reply_to="", references="",
+        )
+
+    def test_html_only_message_is_html(self):
+        assert self._msg("", "<p>hi</p>").body_is_html is True
+
+    def test_plain_message_is_not_html(self):
+        assert self._msg("plain text", "<p>hi</p>").body_is_html is False
+
+    def test_empty_message_is_not_html(self):
+        assert self._msg("", "").body_is_html is False

@@ -12,10 +12,18 @@ CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 RULES_FILE = CONFIG_DIR / "rules.md"
+TIPS_FILE = CONFIG_DIR / "folder_tips.md"
 
-GMAIL_SCOPES = [
+# Calendar write scope is requested up front so detecting invite status now and
+# accepting/declining invites later share a single consent. Changing this list
+# invalidates existing tokens — the next launch re-runs the OAuth flow.
+GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar.events",
 ]
+
+# Backwards-compatible alias (the list now covers more than Gmail).
+GMAIL_SCOPES = GOOGLE_SCOPES
 
 
 @dataclass
@@ -25,6 +33,11 @@ class Config:
     threads_per_page: int = 50
     realname: str = ""
     from_address: str = ""
+    # Voice for AI reply drafts: a short style/persona note and a signature
+    # block the model is told to end with. Both optional; combined with live
+    # samples pulled from the Sent folder.
+    voice_notes: str = ""
+    signature: str = ""
     theme: str = "dark"
     sort_threads: str = "date"  # date | from | subject
     safe_mode: bool = True

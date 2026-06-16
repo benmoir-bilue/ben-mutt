@@ -107,6 +107,27 @@ class Message:
             return _html_to_text(self.body_html)
         return self.snippet
 
+    @property
+    def body_is_html(self) -> bool:
+        """True when `body` is markdown converted from an HTML-only message —
+        the preview renders these through Rich Markdown rather than as raw text."""
+        return not self.body_plain and bool(self.body_html)
+
+    @property
+    def calendar_attachment(self) -> Optional["Attachment"]:
+        """The calendar (.ics) part of a meeting invite, if any. Google sends it
+        both as text/calendar and a duplicate application/ics — either works."""
+        for att in self.attachments:
+            mime = att.mime_type.lower()
+            if mime in ("text/calendar", "application/ics") or \
+                    att.filename.lower().endswith(".ics"):
+                return att
+        return None
+
+    @property
+    def is_invite(self) -> bool:
+        return self.calendar_attachment is not None
+
 
 @dataclass
 class Thread:
@@ -258,21 +279,73 @@ def _extract_body(payload: dict) -> tuple[str, str, list[Attachment]]:
     return plain, html_body, attachments
 
 
+def _strip_html_chrome(h: str) -> str:
+    """Drop the parts of an HTML email that carry no readable content but wreck
+    conversion: MS Office conditional comments, <head> (title + CSS), inline
+    <style>/<script>, and ordinary comments."""
+    h = re.sub(r"<!--\[if[^\]]*\]>.*?<!\[endif\]-->", "", h, flags=re.S | re.I)
+    h = re.sub(r"<head\b.*?</head>", "", h, flags=re.S | re.I)
+    h = re.sub(r"<style\b.*?</style>", "", h, flags=re.S | re.I)
+    h = re.sub(r"<script\b.*?</script>", "", h, flags=re.S | re.I)
+    h = re.sub(r"<!--.*?-->", "", h, flags=re.S)
+    return h
+
+
+def _collapse_blank_lines(text: str) -> str:
+    """Trim trailing whitespace and squeeze runs of blank (incl. space-only)
+    lines down to one — layout tables emit hundreds of space-only lines."""
+    out: list[str] = []
+    blank = False
+    for line in text.splitlines():
+        line = line.rstrip()
+        if line:
+            out.append(line)
+            blank = False
+        elif not blank:
+            out.append("")
+            blank = True
+    return "\n".join(out).strip()
+
+
+_QUOTE_BOUNDARY = re.compile(
+    r"^\s*(On .+ wrote:|From:\s|-+\s*Original Message|________+|"
+    r"This e-mail, and any attachment, is confidential)",
+    re.IGNORECASE,
+)
+
+
+def dequote_reply(body: str) -> str:
+    """Return just the author's own text from a reply — everything above the
+    quoted history. Used to harvest writing-voice samples from the Sent folder."""
+    out: list[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith(">") or _QUOTE_BOUNDARY.match(line):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def _html_to_text(h: str) -> str:
-    """Render HTML email bodies as readable plain text via html2text,
-    falling back to the regex stripper if conversion blows up."""
+    """Convert an HTML email body to clean Markdown via html2text, falling back
+    to the regex stripper if conversion blows up. Layout chrome is stripped
+    first; the result is rendered as Markdown in the preview pane."""
+    h = _strip_html_chrome(h)
     try:
         import html2text
         conv = html2text.HTML2Text()
-        conv.body_width = 0        # no hard wrapping — the preview pane wraps
-        conv.ignore_images = True  # tracking pixels and logos are just noise
-        conv.unicode_snob = True   # real unicode instead of ASCII approximations
-        conv.pad_tables = True     # align table columns
+        conv.body_width = 0          # no hard wrapping — the preview pane wraps
+        conv.ignore_images = True    # tracking pixels and logos are just noise
+        conv.ignore_tables = True    # flatten layout tables to their cell text
+        conv.unicode_snob = True     # real unicode instead of ASCII approximations
+        conv.single_line_break = True
         text = conv.handle(h)
     except Exception:
         return _strip_html(h)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    text = re.sub(r"\[\s*\]\([^)]*\)", "", text)  # empty links left by dropped images
+    # Collapse linked buttons (a link wrapping a link) — invalid Markdown that
+    # would otherwise render as raw [ [text](url) ](url) syntax.
+    text = re.sub(r"\[\s*(\[[^\]]*\]\([^)]*\))\s*\]\([^)]*\)", r"\1", text)
+    return _collapse_blank_lines(text)
 
 
 def _strip_html(h: str) -> str:

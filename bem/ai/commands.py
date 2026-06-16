@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bem.gmail.models import Thread
+    from bem.gmail.models import Thread, Message
+
+
+_MODEL_LABELS = {
+    "claude-opus-4-8": "Claude Opus 4.8",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
+}
+
+
+def model_label(model_id: str) -> str:
+    """Human-readable model name for the AI-draft disclaimer."""
+    return _MODEL_LABELS.get(model_id, model_id)
 
 
 SYSTEM_PROMPT = """You are an email assistant embedded in a terminal email client called bem.
@@ -35,11 +47,49 @@ class AIAssistant:
         )
         yield from self._stream(prompt, self._model_fast)
 
-    def reply_draft(self, thread: "Thread", tone: str = "professional") -> Generator[str, None, None]:
+    def reply_draft(
+        self, thread: "Thread", tone: str = "professional",
+        target: Optional["Message"] = None,
+        voice: str = "", signature: str = "",
+        samples: Optional[list[str]] = None, rules: str = "",
+    ) -> Generator[str, None, None]:
         content = _thread_to_text(thread)
+        focus = ""
+        if target is not None:
+            who = target.from_name or target.from_address
+            focus = (
+                f" Reply specifically to the message from {who} "
+                f"<{target.from_address}>, addressing them — not the most recent "
+                "message in the thread."
+            )
+
+        style = ""
+        if voice.strip():
+            style += f"\n\nWrite in the user's voice. Style notes:\n{voice.strip()}"
+        if samples:
+            joined = "\n\n———\n".join(s.strip() for s in samples if s.strip())
+            if joined:
+                style += (
+                    "\n\nHere are real examples of how the user writes — match "
+                    "their tone, warmth, sentence length and sign-off (do not copy "
+                    f"their content):\n{joined}"
+                )
+        if rules.strip() and "none yet" not in rules.lower():
+            style += f"\n\nStanding rules to honour:\n{rules.strip()}"
+
+        guard = (
+            "\n\nDo NOT invent facts — dates, names, numbers, commitments or "
+            "outcomes you can't verify from the thread. Where a specific is needed "
+            "but unknown, leave a [bracketed placeholder] for the user to fill."
+        )
+        sig = ""
+        if signature.strip():
+            sig = f"\n\nEnd the reply with exactly this signature:\n{signature.strip()}"
+
         prompt = (
             f"Draft a {tone} reply to this email thread. "
-            "Write only the body of the reply — no subject line, no greeting preamble beyond 'Hi X,'.\n\n"
+            "Write only the body of the reply — no subject line, no greeting "
+            "preamble beyond 'Hi X,'." + focus + style + guard + sig + "\n\n"
             + content
         )
         yield from self._stream(prompt, self._model_smart)
@@ -92,19 +142,26 @@ class AIAssistant:
         return json.loads(raw)
 
     def suggest_label(
-        self, thread: "Thread", label_names: list[str], rules: str = ""
+        self, thread: "Thread", label_names: list[str], rules: str = "",
+        tips: str = "",
     ) -> str:
         """One fast call: pick the most logical folder for a thread.
         Returns the model's answer verbatim — caller validates it against
-        the real label list."""
+        the real label list. `tips` is the saved folder-tips document
+        (people/companies/topics per folder) when one exists."""
         msg = thread.last_message
         snippet = (msg.snippet if msg else thread.snippet)[:200]
         sender = thread.sender
         rules_part = f"User filing rules:\n{rules}\n\n" if rules.strip() else ""
+        tips_part = (
+            f"What lives in each folder (from a recent scan):\n{tips}\n\n"
+            if tips.strip() else ""
+        )
         prompt = (
             "Pick the single best folder for this email from the list.\n"
             f"Folders: {', '.join(label_names)}\n\n"
             f"{rules_part}"
+            f"{tips_part}"
             f"From: {sender}\n"
             f"Subject: {thread.subject}\n"
             f"Snippet: {snippet}\n\n"

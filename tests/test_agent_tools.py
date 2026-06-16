@@ -158,3 +158,75 @@ class TestDraftReply:
         out, err = executor.execute(
             "draft_reply", {"thread_id": "t1", "body": "  ", "reason": "r"})
         assert err
+
+
+class TestTransientRetry:
+    def test_transient_oserror_is_retried(self, threads, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("bem.ai.tools.time.sleep", sleeps.append)
+
+        class FlakyGmail(FakeGmail):
+            def __init__(self, threads):
+                super().__init__(threads=threads)
+                self.calls = 0
+
+            def list_threads(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError(49, "Can't assign requested address")
+                return self.threads, None
+
+        gmail = FlakyGmail(threads)
+        executor = ToolExecutor(gmail, threads)
+        out, err = executor.execute("search_threads", {"query": "in:inbox"})
+        assert not err
+        assert gmail.calls == 2
+        assert len(sleeps) == 1
+
+    def test_persistent_error_is_reported_after_retries(self, threads, monkeypatch):
+        monkeypatch.setattr("bem.ai.tools.time.sleep", lambda s: None)
+
+        class DeadGmail(FakeGmail):
+            def list_threads(self, **kwargs):
+                raise OSError(49, "Can't assign requested address")
+
+        executor = ToolExecutor(DeadGmail(threads=threads), threads)
+        out, err = executor.execute("search_threads", {"query": "in:inbox"})
+        assert err
+        assert "OSError" in out
+
+    def test_non_transient_errors_are_not_retried(self, threads, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("bem.ai.tools.time.sleep", sleeps.append)
+
+        class BrokenGmail(FakeGmail):
+            def list_threads(self, **kwargs):
+                raise ValueError("bad query")
+
+        executor = ToolExecutor(BrokenGmail(threads=threads), threads)
+        out, err = executor.execute("search_threads", {"query": "in:inbox"})
+        assert err
+        assert sleeps == []
+
+
+class TestSaveFolderTips:
+    def test_save_writes_tips_file(self, executor, tmp_path, monkeypatch):
+        import bem.ai.tips as tips_mod
+        path = tmp_path / "folder_tips.md"
+        monkeypatch.setattr(tips_mod, "TIPS_FILE", path)
+        out, err = executor.execute(
+            "save_folder_tips", {"tips": "## Finance\n- topics: invoices"}
+        )
+        assert not err
+        assert "saved" in out
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("<!-- generated: ")
+        assert "## Finance" in text
+
+    def test_empty_tips_rejected(self, executor, tmp_path, monkeypatch):
+        import bem.ai.tips as tips_mod
+        path = tmp_path / "folder_tips.md"
+        monkeypatch.setattr(tips_mod, "TIPS_FILE", path)
+        out, err = executor.execute("save_folder_tips", {"tips": "   "})
+        assert err
+        assert not path.exists()

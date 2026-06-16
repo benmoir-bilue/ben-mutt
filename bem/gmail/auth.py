@@ -7,12 +7,18 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from bem.config import CREDENTIALS_FILE, TOKEN_FILE, GMAIL_SCOPES, CONFIG_DIR
+from bem.config import CREDENTIALS_FILE, TOKEN_FILE, GOOGLE_SCOPES, CONFIG_DIR
 
 
 def authenticate() -> Credentials:
     """Return valid credentials, refreshing or prompting as needed."""
     creds = _load_token()
+
+    # A token granted before a scope was added stays "valid", but calls needing
+    # the new scope would 403. Force a fresh consent when scopes are missing.
+    if creds and not _has_required_scopes():
+        print("bem: additional Google permissions needed (Calendar), re-authenticating")
+        creds = None
 
     if creds and creds.valid:
         return creds
@@ -36,7 +42,7 @@ def authenticate() -> Credentials:
         _print_setup_instructions()
         sys.exit(1)
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), GMAIL_SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), GOOGLE_SCOPES)
     creds = flow.run_local_server(port=0, open_browser=True)
     _save_token(creds)
     return creds
@@ -46,9 +52,22 @@ def _load_token() -> Credentials | None:
     if not TOKEN_FILE.exists():
         return None
     try:
-        return Credentials.from_authorized_user_file(str(TOKEN_FILE), GMAIL_SCOPES)
+        return Credentials.from_authorized_user_file(str(TOKEN_FILE), GOOGLE_SCOPES)
     except Exception:
         return None
+
+
+def _has_required_scopes() -> bool:
+    """True when the saved token was granted every scope in GOOGLE_SCOPES.
+    Reads the granted scopes straight from the token file rather than trusting
+    the requested-scopes list passed when loading the credential."""
+    try:
+        import json
+        data = json.loads(TOKEN_FILE.read_text())
+    except Exception:
+        return False
+    granted = set(data.get("scopes") or [])
+    return set(GOOGLE_SCOPES).issubset(granted)
 
 
 def _save_token(creds: Credentials) -> None:

@@ -38,30 +38,43 @@ class FolderList(ListView):
 
     def populate(self, labels: list[GmailLabel]) -> None:
         old_index = self.index
-        self.clear()
-        self._labels = []
+        kept: list[GmailLabel] = []
+        items: list[ListItem] = []
         for label in labels:
             if label.type == "system" and label.name not in (
                 "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED"
             ):
                 continue
-            self._labels.append(label)
+            kept.append(label)
             text = label.display_name
             if label.messages_unread > 0:
                 text = f"{label.display_name} ({label.messages_unread})"
             item = ListItem(Label(text), id=f"label-{label.id}")
             if label.messages_unread > 0:
                 item.add_class("unread")
-            self.append(item)
-        if self._labels and old_index is not None:
-            try:
-                self.index = min(old_index, len(self._labels) - 1)
-            except Exception:
-                pass
+            items.append(item)
+        self._labels = kept
+
+        # clear() removes the old items asynchronously; appending new items
+        # (with the same widget ids) before that lands raises DuplicateIds and
+        # leaves the scroll offset pointing past the content. Rebuild in one
+        # awaited sequence instead.
+        async def rebuild() -> None:
+            await self.clear()
+            await self.extend(items)
+            if kept and old_index is not None:
+                self.index = min(old_index, len(kept) - 1)
+            else:
+                self.scroll_home(animate=False)
+
+        self.call_later(rebuild)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        idx = self.index
-        if idx is not None and 0 <= idx < len(self._labels):
-            label = self._labels[idx]
+        # Resolve by item id, not index — a rebuild may be in flight.
+        label = next(
+            (l for l in self._labels if f"label-{l.id}" == (event.item.id or "")),
+            None,
+        )
+        if label is not None:
             self.post_message(self.LabelSelected(label))
         event.stop()

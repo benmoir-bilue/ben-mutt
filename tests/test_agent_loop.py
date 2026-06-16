@@ -136,3 +136,81 @@ def test_haiku_models_skip_thinking(make_message):
     a._client = client
     a.run("goal", threads, emit=lambda e: None, is_cancelled=lambda: False)
     assert "thinking" not in client.requests[0]
+
+
+def test_turn_limit_sets_flag_and_injects_wrap_up_nudge(agent, monkeypatch):
+    import bem.ai.agent as agent_mod
+    monkeypatch.setattr(agent_mod, "MAX_TURNS", 6)  # WRAP_UP_AT=4 → nudge at turn 2
+
+    a, threads = agent
+    client = ScriptedClient([
+        _response([_tool_use(f"tu{i}", "search_threads", {"query": "in:inbox"})])
+        for i in range(6)
+    ])
+    a._client = client
+
+    result = a.run("sort", threads, emit=lambda e: None, is_cancelled=lambda: False)
+
+    assert result is not None
+    assert result.turns == 6
+    assert "turn limit" in result.warning
+
+    # The agent mutates one messages list in place (the recorded requests all
+    # alias it), so inspect its final state: exactly one nudge, riding along
+    # with turn 2's tool results — messages run goal, asst1, results1, asst2,
+    # results2+nudge, putting the nudge in the message at index 4.
+    messages = client.requests[-1]["messages"]
+    nudges = [
+        (i, b) for i, m in enumerate(messages) if isinstance(m["content"], list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "text"
+        and "turns remain" in b.get("text", "")
+    ]
+    assert len(nudges) == 1  # injected once, not every turn
+    assert nudges[0][0] == 4
+
+
+def test_finishing_normally_sets_no_warning(agent):
+    a, threads = agent
+    a._client = ScriptedClient([_response([_text("done")], stop_reason="end_turn")])
+    result = a.run("sort", threads, emit=lambda e: None, is_cancelled=lambda: False)
+    assert result is not None
+    assert result.warning == ""
+
+
+def test_truncated_response_is_retried_once(agent):
+    """A response cut off by max_tokens has no tool calls and no text — it
+    must not be mistaken for a finished run."""
+    a, threads = agent
+    client = ScriptedClient([
+        _response([], stop_reason="max_tokens"),               # thinking ate the budget
+        _response([_text("all sorted")], stop_reason="end_turn"),
+    ])
+    a._client = client
+    events = []
+    result = a.run("sort", threads, emit=events.append, is_cancelled=lambda: False)
+    assert result is not None
+    assert result.warning == ""
+    assert result.summary == "all sorted"
+    assert len(client.requests) == 2
+    assert any("token cap" in e[1] for e in events if e[0] == "text")
+
+
+def test_repeated_truncation_ends_with_warning(agent):
+    a, threads = agent
+    a._client = ScriptedClient([
+        _response([], stop_reason="max_tokens"),
+        _response([], stop_reason="max_tokens"),
+    ])
+    result = a.run("sort", threads, emit=lambda e: None, is_cancelled=lambda: False)
+    assert result is not None
+    assert "token cap" in result.warning
+
+
+def test_thinking_runs_get_a_larger_output_budget(agent):
+    import bem.ai.agent as agent_mod
+    a, threads = agent
+    client = ScriptedClient([_response([_text("done")], stop_reason="end_turn")])
+    a._client = client
+    a.run("sort", threads, emit=lambda e: None, is_cancelled=lambda: False)
+    assert client.requests[0]["max_tokens"] == agent_mod.MAX_TOKENS_THINKING
