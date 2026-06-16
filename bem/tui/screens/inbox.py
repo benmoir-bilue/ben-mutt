@@ -307,6 +307,8 @@ class InboxScreen(Screen):
         self._copilot_chat: list[dict] = []           # rolling chat history
         self._last_activity: float = 0.0              # monotonic; for idle detection
         self._copilot_word = 0                        # rotates status words
+        self._copilot_feed: list = []                 # ordered TriageNotes (the [n] refs)
+        self._copilot_undo: list[dict] = []           # reversible actions Mutt took
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -683,6 +685,8 @@ class InboxScreen(Screen):
                 self.config.ai_model_fast, self.config.ai_model_smart,
             )
         self._copilot_on = True
+        self._copilot_feed = []
+        self._copilot_undo = []
         # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
         # then give an initial digest of the top few threads already sitting here.
         self._seen_thread_ids = {t.id for t in self._threads}
@@ -776,10 +780,29 @@ class InboxScreen(Screen):
         self.query_one(CopilotPanel).end_thinking()
 
     def _on_triage_note(self, note: "copilot_mod.TriageNote") -> None:
-        self.query_one(CopilotPanel).post_triage(note)
+        self._copilot_feed.append(note)
+        number = len(self._copilot_feed)
+        self.query_one(CopilotPanel).post_triage(note, number)
         # Auto-open only the genuinely urgent, and only when the user is idle.
         if note.urgency == "high" and self._is_idle():
             self._open_thread_by_id(note.thread_id)
+
+    def _copilot_context(self) -> str:
+        """The numbered feed + currently-open thread, so Mutt can resolve
+        'archive 4' or 'the invoice' to a real thread id."""
+        lines = ["NUMBERED FEED (most recent at the bottom):"]
+        feed = self._copilot_feed
+        for idx in range(max(0, len(feed) - 20), len(feed)):
+            n = feed[idx]
+            lines.append(
+                f"[{idx + 1}] id={n.thread_id} | {n.sender} | {n.subject} — {n.summary}"
+            )
+        if self._current_thread is not None:
+            lines.append(
+                f"\nCURRENTLY OPEN: id={self._current_thread.id} | "
+                f"{self._current_thread.subject}"
+            )
+        return "\n".join(lines)
 
     def _open_thread_by_id(self, thread_id: str) -> None:
         ml = self.query_one(MessageList)
@@ -829,7 +852,8 @@ class InboxScreen(Screen):
         self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
         convo = list(self._copilot_chat)
         convo.append({"role": "user", "content": text})
-        ui = lambda action, arg: self.app.call_from_thread(self._apply_copilot_ui, action, arg)
+        context = self.app.call_from_thread(self._copilot_context)
+        ui = lambda name, args: self.app.call_from_thread(self._apply_copilot_ui, name, args)
         emit = lambda t: self.app.call_from_thread(self.query_one(CopilotPanel).post_mutt, t)
         executor = CopilotExecutor(
             self.gmail, self._cal, ui, self._threads, rules=_load_rules(),
@@ -838,6 +862,7 @@ class InboxScreen(Screen):
             reply = self._copilot.chat(
                 convo, executor, emit,
                 lambda: worker.is_cancelled or not self._copilot_on,
+                context=context,
             )
         except Exception as e:
             log.debug("copilot chat failed: %s", e)
@@ -848,12 +873,72 @@ class InboxScreen(Screen):
             self._copilot_chat = self._copilot_chat[-20:]
         self.app.call_from_thread(self._copilot_end_thinking)
 
-    def _apply_copilot_ui(self, action: str, arg: str) -> None:
-        """UI tools Mutt fires, run on the main thread."""
-        if action == "open_thread":
-            self._open_thread_by_id(arg)
-        elif action == "run_command":
-            self._run_command(arg)
+    _COPILOT_KNOWN_CMDS = {
+        "summarise", "summarize", "summary", "triage", "explain", "reply-draft",
+        "draft-reply", "rd", "ai", "ask", "search", "move", "mv", "cal-clean",
+        "cal-clean!", "sort", "zero", "tips",
+    }
+
+    def _apply_copilot_ui(self, name: str, args: dict) -> str:
+        """Action + UI tools Mutt fires, run on the main thread. Returns an
+        honest result string fed back to Mutt."""
+        tid = args.get("thread_id", "")
+        if name == "open_thread":
+            self._open_thread_by_id(tid)
+            return f"opened '{self._thread_subject(tid)}'"
+        if name == "archive_thread":
+            self._mutate_thread(tid, "archive")
+            self._copilot_undo.append({"op": "archive", "thread_id": tid})
+            return f"archived '{self._thread_subject(tid)}' (say 'undo' to restore)"
+        if name == "trash_thread":
+            self._mutate_thread(tid, "trash")
+            self._copilot_undo.append({"op": "trash", "thread_id": tid})
+            return f"trashed '{self._thread_subject(tid)}' (in Trash; say 'undo' to restore)"
+        if name == "file_thread":
+            label = args.get("label", "").strip()
+            if not label:
+                return "need a label to file under"
+            self._move_worker(tid, label)
+            self._copilot_undo.append({"op": "file", "thread_id": tid})
+            return f"filed '{self._thread_subject(tid)}' under {label} (say 'undo' to restore)"
+        if name == "undo_last":
+            return self._copilot_undo_last()
+        if name == "run_command":
+            cmd = args.get("command", "").strip().lstrip(":")
+            head = cmd.split(None, 1)[0].lower() if cmd else ""
+            if head not in self._COPILOT_KNOWN_CMDS:
+                return f"'{cmd}' isn't a bem command I can run"
+            self._run_command(cmd)
+            return f"ran :{cmd}"
+        return f"unknown action: {name}"
+
+    def _thread_subject(self, thread_id: str) -> str:
+        for n in self._copilot_feed:
+            if n.thread_id == thread_id:
+                return n.subject
+        t = self._thread_by_id(thread_id) or self._thread_cache.get(thread_id)
+        return t.subject if t else thread_id[:12]
+
+    def _copilot_undo_last(self) -> str:
+        if not self._copilot_undo:
+            return "nothing to undo"
+        entry = self._copilot_undo.pop()
+        self._copilot_undo_worker(entry["thread_id"], entry["op"])
+        return f"undoing the last {entry['op']}"
+
+    @work(thread=True, group="mutations", exit_on_error=False)
+    def _copilot_undo_worker(self, thread_id: str, op: str) -> None:
+        worker = get_current_worker()
+        try:
+            if op == "trash":
+                self.gmail.untrash(thread_id)
+            else:  # archive / file -> put it back in the inbox
+                self.gmail.modify_thread(thread_id, add_labels=["INBOX"])
+        except Exception as e:
+            log.error("copilot undo failed: %s", e)
+            return
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self.notify, "Restored to inbox 🐕")
 
     def on_key(self, event: events.Key) -> None:
         # Track activity so Mutt knows when the user is busy (don't grab focus

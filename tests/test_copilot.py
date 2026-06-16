@@ -67,6 +67,90 @@ class TestTriageNote:
         assert note.action == "none"      # invalid → none
 
 
+class TestCopilotExecutor:
+    def _ex(self, calendar=None):
+        from bem.ai.copilot import CopilotExecutor
+        calls = []
+        def fake_ui(name, args):
+            calls.append((name, args))
+            return f"did {name}"
+        ex = CopilotExecutor(gmail=None, calendar=calendar, ui_action=fake_ui, threads=[])
+        return ex, calls
+
+    def test_action_tools_route_to_ui(self):
+        ex, calls = self._ex()
+        for tool in ("archive_thread", "trash_thread", "open_thread", "undo_last", "run_command"):
+            out, err = ex.execute(tool, {"thread_id": "t1"})
+            assert not err and out == f"did {tool}"
+        assert [c[0] for c in calls] == [
+            "archive_thread", "trash_thread", "open_thread", "undo_last", "run_command",
+        ]
+
+    def test_file_thread_carries_label(self):
+        ex, calls = self._ex()
+        ex.execute("file_thread", {"thread_id": "t1", "label": "Recruiting"})
+        assert calls[-1] == ("file_thread", {"thread_id": "t1", "label": "Recruiting"})
+
+    def test_unknown_tool_is_error(self):
+        ex, _ = self._ex()
+        _, err = ex.execute("frobnicate", {})
+        assert err
+
+    def test_check_calendar_without_calendar(self):
+        ex, _ = self._ex(calendar=None)
+        out, err = ex.execute("check_calendar", {"thread_id": "t1"})
+        assert err and "calendar" in out.lower()
+
+
+class _FakeGmail:
+    email_address = "ben@example.com"
+    credentials = None
+    def __init__(self):
+        self.archived, self.trashed, self.modified = [], [], []
+    def get_profile(self):
+        return {"emailAddress": self.email_address}
+    def list_labels(self):
+        return []
+    def list_threads(self, **kw):
+        return ([], None)
+    def get_thread(self, tid):
+        return None
+    def archive(self, tid):
+        self.archived.append(tid)
+    def trash(self, tid):
+        self.trashed.append(tid)
+    def untrash(self, tid):
+        self.modified.append(("untrash", tid))
+    def modify_thread(self, tid, add_labels=None, remove_labels=None):
+        self.modified.append((tid, add_labels))
+
+
+@pytest.mark.asyncio
+async def test_inbox_copilot_actions_and_undo():
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.ai.copilot import TriageNote
+    g = _FakeGmail()
+    app = BemApp(gmail=g, config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_feed = [TriageNote("t1", "Invoice 16 Jun", "ben@example.com", summary="invoice")]
+        # archive by id, with subject in the report + undo tracked
+        r = scr._apply_copilot_ui("archive_thread", {"thread_id": "t1"})
+        await pilot.pause()
+        assert "archived" in r.lower() and "Invoice" in r
+        assert g.archived == ["t1"]
+        assert scr._copilot_undo[-1]["op"] == "archive"
+        # honest run_command feedback
+        assert "isn't a bem command" in scr._apply_copilot_ui("run_command", {"command": "status"})
+        assert scr._apply_copilot_ui("run_command", {"command": ":summarise"}).startswith("ran")
+        # undo puts it back in the inbox
+        scr._apply_copilot_ui("undo_last", {})
+        await pilot.pause()
+        assert ("t1", ["INBOX"]) in g.modified
+
+
 class _Host(App):
     def compose(self) -> ComposeResult:
         yield CopilotPanel(id="copilot")
@@ -84,7 +168,7 @@ async def test_panel_mounts_and_posts():
         panel.post_triage(TriageNote(
             "t1", "Subject", "alice@example.com", urgency="high",
             summary="needs a reply today", action="reply", reason="client waiting",
-        ))
+        ), number=1)
         panel.post_mutt("Woof — that one looks urgent.")
         panel.post_user("what's urgent?")
         panel.begin_thinking(0)

@@ -75,8 +75,11 @@ class CopilotPanel(Vertical):
         self.display = True
         self._feed.write(Text("🐕 Mutt is on watch. I'll bark when something matters.",
                               style="bold $accent"))
-        self._feed.write(Text("Type to ask me anything; press t to talk, Esc to leave.",
-                              style="dim"))
+        self._feed.write(Text(
+            "Tell me what to do — e.g. \"archive 4 and the invoice\", "
+            "\"reply to Marie\", \"delete that\". Press t to talk, Esc to leave.",
+            style="dim",
+        ))
         self._set_title()
 
     def stop(self) -> None:
@@ -112,21 +115,22 @@ class CopilotPanel(Vertical):
 
     # ── Feed ────────────────────────────────────────────────────────────────
 
-    def post_triage(self, note: "copilot.TriageNote") -> None:
+    def post_triage(self, note: "copilot.TriageNote", number: int) -> None:
         glyph = _URGENCY_GLYPH.get(note.urgency, "•")
         style = _URGENCY_STYLE.get(note.urgency, "")
         self._feed.write(Text(""))
         self._feed.write(Text.assemble(
+            (f"[{number}] ", "bold cyan"),
             (f"{glyph} ", style or "dim"),
             (f"{_clip(note.sender, 22)}  ", "bold"),
             (note.summary, style),
         ))
         if note.action != "none":
+            # A suggestion, not a keystroke — tell Mutt "archive {number}" to act.
             self._feed.write(Text.assemble(
-                ("   ↳ ", "dim"),
-                (f"{note.action}", "bold cyan"),
-                (f" — {note.hint}" if note.hint else "", "cyan"),
-                (f"   ({note.reason})" if note.reason else "", "dim italic"),
+                ("   ↳ suggest ", "dim"),
+                (note.action, "bold cyan"),
+                (f" — {note.reason}" if note.reason else "", "dim italic"),
             ))
 
     def post_mutt(self, text: str) -> None:
