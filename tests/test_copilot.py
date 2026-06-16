@@ -96,10 +96,39 @@ class TestCopilotExecutor:
         _, err = ex.execute("frobnicate", {})
         assert err
 
+    def test_driver_tools_route_to_ui(self):
+        ex, calls = self._ex()
+        for tool, args in (("move_cursor", {"direction": "down"}),
+                           ("scroll_preview", {"direction": "up"}),
+                           ("expand_thread", {})):
+            out, err = ex.execute(tool, args)
+            assert not err and out == f"did {tool}"
+        assert [c[0] for c in calls] == ["move_cursor", "scroll_preview", "expand_thread"]
+
+
     def test_check_calendar_without_calendar(self):
         ex, _ = self._ex(calendar=None)
         out, err = ex.execute("check_calendar", {"thread_id": "t1"})
         assert err and "calendar" in out.lower()
+
+
+class TestDemoTrigger:
+    def _is(self, s):
+        from bem.tui.screens.inbox import InboxScreen
+        return InboxScreen._is_demo_request(s)
+
+    def test_recognises_demo_phrases(self):
+        assert self._is("Show me how you can control the TUI")
+        assert self._is("show me how you control the interface")
+        assert self._is("drive the tui")
+        assert self._is("demo")
+        assert self._is("autopilot")
+
+    def test_rejects_normal_chat(self):
+        assert not self._is("archive 4 and the invoice")
+        assert not self._is("what's urgent today?")
+        assert not self._is("reply to Marie")
+        assert not self._is("show me the urgent ones")
 
 
 class _FakeGmail:
@@ -149,6 +178,34 @@ async def test_inbox_copilot_actions_and_undo():
         scr._apply_copilot_ui("undo_last", {})
         await pilot.pause()
         assert ("t1", ["INBOX"]) in g.modified
+
+
+@pytest.mark.asyncio
+async def test_inbox_copilot_drives_selection(make_message):
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import MessageList
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        ml = scr.query_one(MessageList)
+        ml.populate([
+            Thread(id="t1", snippet="a", messages=[make_message(id="m1", thread_id="t1", subject="One")]),
+            Thread(id="t2", snippet="b", messages=[make_message(id="m2", thread_id="t2", subject="Two")]),
+        ])
+        await pilot.pause()
+        scr._drive_cursor("top")
+        await pilot.pause()
+        assert ml.cursor_row == 0
+        # move_cursor tool drives the selection down a row
+        r = scr._apply_copilot_ui("move_cursor", {"direction": "down"})
+        await pilot.pause()
+        assert "moved selection down" in r and ml.cursor_row == 1
+        # scroll + expand drivers run without error
+        assert "scrolled" in scr._apply_copilot_ui("scroll_preview", {"direction": "down"})
+        assert "toggled" in scr._apply_copilot_ui("expand_thread", {})
 
 
 class _Host(App):

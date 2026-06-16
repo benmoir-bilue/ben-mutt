@@ -11,6 +11,7 @@ own. When you ask it to in chat, that's you acting — it'll drive the UI for yo
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -216,6 +217,10 @@ Your tools:
 - open_thread (show him an email), check_calendar (his diary),
   search_threads / get_thread (read), run_command (other bem commands like
   ':summarise'; it tells you if the command wasn't recognised).
+- DRIVE the screen so Ben can watch you work: move_cursor (down/up/top/bottom)
+  to scroll the inbox selection, scroll_preview (down/up) to read an open email,
+  expand_thread to unfold a conversation. Narrate briefly as you move ("scrolling
+  down…", "opening this one…") so it reads like an autopilot.
 
 Acting: Ben asking IS his consent. When he tells you to archive / file / trash, \
 do it with the tool, then report in one short line and mention undo, e.g. \
@@ -255,6 +260,11 @@ COPILOT_CHAT_TOOLS: list[dict] = [
           dict(_THREAD_ID), ["thread_id"]),
     _tool("open_thread", "Open a thread in Ben's list + preview so he can see it.",
           dict(_THREAD_ID), ["thread_id"]),
+    _tool("move_cursor", "Drive the inbox selection so Ben watches it move — direction 'down'/'up'/'top'/'bottom'.",
+          {"direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]}}, ["direction"]),
+    _tool("scroll_preview", "Scroll the currently open email in the preview pane — 'down' or 'up'.",
+          {"direction": {"type": "string", "enum": ["down", "up"]}}, ["direction"]),
+    _tool("expand_thread", "Expand or collapse the highlighted thread in the list.", {}, []),
     _tool("archive_thread", "Archive a specific thread out of the inbox (Ben must have asked). Reversible with undo_last.",
           dict(_THREAD_ID), ["thread_id"]),
     _tool("trash_thread", "Move a specific thread to Trash (Ben must have asked). Reversible with undo_last.",
@@ -275,8 +285,11 @@ class CopilotExecutor:
     # Tools delegated to the inbox's main-thread handler.
     _UI_TOOLS = (
         "open_thread", "archive_thread", "trash_thread", "file_thread",
-        "undo_last", "run_command",
+        "undo_last", "run_command", "move_cursor", "scroll_preview", "expand_thread",
     )
+    # Movement tools get a short pause after each so Ben can watch the autopilot
+    # move, rather than the screen jumping to its final state instantly.
+    _PACED = ("open_thread", "move_cursor", "scroll_preview", "expand_thread")
 
     def __init__(
         self, gmail: "GmailClient", calendar, ui_action: Callable[[str, dict], str],
@@ -296,9 +309,12 @@ class CopilotExecutor:
             return self._check_calendar(args.get("thread_id", ""))
         if name in self._UI_TOOLS:
             try:
-                return self._ui(name, args) or "done", False
+                out = self._ui(name, args) or "done"
             except Exception as e:
                 return f"couldn't {name}: {e}", True
+            if name in self._PACED:
+                time.sleep(0.45)  # let Ben see the movement before the next step
+            return out, False
         return f"Unknown tool: {name}", True
 
     def _check_calendar(self, thread_id: str) -> tuple[str, bool]:

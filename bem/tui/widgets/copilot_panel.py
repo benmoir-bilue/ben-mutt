@@ -80,6 +80,9 @@ class CopilotPanel(Vertical):
             "\"reply to Marie\", \"delete that\". Press t to talk, Esc to leave.",
             style="dim",
         ))
+        self._feed.write(Text(
+            "New? Try: \"show me how you can control the TUI\".", style="dim italic",
+        ))
         self._set_title()
 
     def stop(self) -> None:

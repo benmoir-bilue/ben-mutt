@@ -212,7 +212,10 @@ class CopilotMixin:
         panel.focus_input()
 
     def on_copilot_panel_chat_submitted(self, event: CopilotPanel.ChatSubmitted) -> None:
-        self._copilot_chat_worker(event.text)
+        if self._is_demo_request(event.text):
+            self._copilot_demo_worker()
+        else:
+            self._copilot_chat_worker(event.text)
         event.stop()
 
     def _copilot_say(self, message: str) -> None:
@@ -222,7 +225,10 @@ class CopilotMixin:
             if not self._copilot_on:
                 return  # no API key
         self.query_one(CopilotPanel).post_user(message)
-        self._copilot_chat_worker(message)
+        if self._is_demo_request(message):
+            self._copilot_demo_worker()
+        else:
+            self._copilot_chat_worker(message)
 
     @work(thread=True, exclusive=True, group="copilot-chat", exit_on_error=False)
     def _copilot_chat_worker(self, text: str) -> None:
@@ -283,7 +289,100 @@ class CopilotMixin:
                 return f"'{cmd}' isn't a bem command I can run"
             self._run_command(cmd)
             return f"ran :{cmd}"
+        if name == "move_cursor":
+            direction = args.get("direction", "down")
+            self._drive_cursor(direction)
+            return f"moved selection {direction}"
+        if name == "scroll_preview":
+            direction = args.get("direction", "down")
+            self._drive_scroll(direction)
+            return f"scrolled preview {direction}"
+        if name == "expand_thread":
+            self._drive_expand()
+            return "toggled thread expand"
         return f"unknown action: {name}"
+
+    # ── TUI driver primitives (main thread) ──────────────────────────────────
+
+    def _drive_cursor(self, direction: str) -> None:
+        ml = self.query_one(MessageList)
+        ml.focus()
+        if direction == "up":
+            ml.action_cursor_up()
+        elif direction == "top":
+            ml.move_cursor(row=0)
+        elif direction == "bottom":
+            ml.action_cursor_bottom()
+        else:
+            ml.action_cursor_down()
+
+    def _drive_scroll(self, direction: str) -> None:
+        preview = self.query_one(MessagePreview)
+        (preview.scroll_up if direction == "up" else preview.scroll_down)()
+
+    def _drive_expand(self) -> None:
+        self.query_one(MessageList).action_toggle_thread()
+
+    def _mutt_say(self, text: str) -> None:
+        self.query_one(CopilotPanel).post_mutt(text)
+
+    # ── "Show me how you can control the TUI" — scripted autopilot demo ───────
+
+    @staticmethod
+    def _is_demo_request(text: str) -> bool:
+        t = text.lower().strip().strip(":/ ")
+        if t in ("demo", "autopilot"):
+            return True
+        if "control the tui" in t or "control the interface" in t or "drive the tui" in t:
+            return True
+        return ("show" in t and ("control" in t or "drive" in t)
+                and ("tui" in t or "interface" in t or "screen" in t or "you" in t))
+
+    @work(thread=True, exclusive=True, group="copilot-demo", exit_on_error=False)
+    def _copilot_demo_worker(self) -> None:
+        """A paced choreography proving Mutt can drive the TUI: move the inbox
+        selection, preview, open/expand, scroll — narrating each step."""
+        worker = get_current_worker()
+
+        def alive() -> bool:
+            return not worker.is_cancelled and self._copilot_on
+
+        def do(fn, *a) -> None:
+            if alive():
+                self.app.call_from_thread(fn, *a)
+
+        def say(text: str) -> None:
+            do(self._mutt_say, text)
+
+        if not self._threads:
+            say("Inbox's empty right now, so there's nothing to drive — load "
+                "some mail and ask me again. 🐕")
+            return
+        say("Watch this — I'll take the wheel and drive your inbox. 🐕")
+        time.sleep(1.3)
+        do(self._drive_cursor, "top")
+        say("Jumping to the top of the inbox…")
+        time.sleep(1.1)
+        for _ in range(min(3, max(1, len(self._threads) - 1))):
+            if not alive():
+                return
+            do(self._drive_cursor, "down")
+            time.sleep(0.9)
+        say("…scrolling down, previewing each one as I pass it.")
+        time.sleep(1.1)
+        say("Let me unfold this conversation and read down it…")
+        do(self._drive_expand)
+        time.sleep(0.9)
+        for _ in range(2):
+            if not alive():
+                return
+            do(self._drive_scroll, "down")
+            time.sleep(0.7)
+        time.sleep(0.5)
+        say("That's the gist: I can move the selection, open & preview, scroll, "
+            "and expand threads — and act (archive, file, reply, RSVP) the moment "
+            "you ask. Try: \"archive 1\", \"open the one from Anna\", or \"what's "
+            "urgent?\"")
 
     def _thread_subject(self, thread_id: str) -> str:
         for n in self._copilot_feed:
