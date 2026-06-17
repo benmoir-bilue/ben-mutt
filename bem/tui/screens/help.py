@@ -50,6 +50,7 @@ BINDINGS_TABLE = [
     (":copilot / :mutt", "Toggle Mutt, the live inbox copilot", "Copilot"),
     (":mutt <message>", "Ask Mutt something",          "Copilot"),
     ("t",            "Talk to Mutt (focus chat)",     "Copilot"),
+    ("(to Mutt)",    "\"show me how you can control the TUI\" — autopilot demo", "Copilot"),
     ("A / M / X",    "Invite: accept / maybe / decline", "Calendar"),
     (":cal-clean",   "Count calendar emails safe to delete", "Calendar"),
     (":cal-clean!",  "Trash handled invites (✓ ~ ⊘ ✗)", "Calendar"),

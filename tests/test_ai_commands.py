@@ -61,7 +61,7 @@ def _capture_reply_prompt(make_thread, make_message, target):
     thread = make_thread(
         make_message(id="m1", from_name="Jeejee", from_address="jeejeeu@gmail.com",
                      body_plain="my CV"),
-        make_message(id="m2", from_name="Ben", from_address="ben@bilue.com.au",
+        make_message(id="m2", from_name="Ben", from_address="ben@example.com",
                      body_plain="fwd to cam"),
     )
     list(ai.reply_draft(thread, target=target))

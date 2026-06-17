@@ -11,6 +11,7 @@ own. When you ask it to in chat, that's you acting — it'll drive the UI for yo
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -159,12 +160,14 @@ class CopilotBrain:
         executor: "CopilotExecutor",
         emit: Callable[[str], None],
         is_cancelled: Callable[[], bool],
+        context: str = "",
         max_turns: int = 8,
     ) -> str:
         """Sonnet conversation with tools. Emits assistant commentary to the
-        feed as it goes; executes read tools against Gmail and UI tools via the
-        executor's callback. Returns the final reply text."""
-        system = _CHAT_SYSTEM.format(rules=executor.rules)
+        feed as it goes; executes read tools against Gmail and action tools via
+        the executor's callback. `context` is the numbered feed + open thread so
+        Mutt can resolve 'archive 4' / 'the invoice'. Returns the final reply."""
+        system = _CHAT_SYSTEM.format(rules=executor.rules, context=context or "(inbox quiet)")
         last_text = ""
         for _ in range(max_turns):
             if is_cancelled():
@@ -199,87 +202,97 @@ class CopilotBrain:
 
 
 _CHAT_SYSTEM = """You are Mutt, Ben's loyal inbox dog in the bem terminal email \
-client. You're chatting with Ben in the side panel. Be warm, brief and a little \
-playful — a good dog who's sharp about email. Plain text, short lines.
+client. You chat with Ben in the side panel — warm, brief, a little playful, and \
+sharp about email. Plain text, short lines.
 
-What you can do:
-- Read mail (search_threads, get_thread) and check his diary (check_calendar).
-- Drive his screen: open_thread shows him an email; run_command fires a bem command.
-- Draft replies right here in chat for him to read.
+Ben refers to emails by their [n] number in the feed, by sender, or by subject. \
+Work out which thread he means from the NUMBERED FEED and INBOX below and act on \
+that thread's id. If it is genuinely ambiguous (e.g. two from the same person), \
+ask a short clarifying question rather than guessing.
 
-bem commands for run_command (single letters act on the currently open thread):
-  r = reply, :rd <tone> = AI-draft a reply, s = file (suggests a label),
-  e = archive, d = delete/trash, :summarise, :move <label>, :cal-clean,
-  A/M/X = accept/maybe/decline a calendar invite.
+Your tools:
+- archive_thread / trash_thread / file_thread — act on ONE specific thread by id.
+  These are how you do what Ben asks. file_thread needs a label.
+- undo_last — reverse your most recent archive/file/trash.
+- open_thread (show him an email), check_calendar (his diary),
+  search_threads / get_thread (read), run_command (other bem commands like
+  ':summarise'; it tells you if the command wasn't recognised).
+- DRIVE the screen so Ben can watch you work: move_cursor (down/up/top/bottom)
+  to scroll the inbox selection, scroll_preview (down/up) to read an open email,
+  expand_thread to unfold a conversation. Narrate briefly as you move ("scrolling
+  down…", "opening this one…") so it reads like an autopilot.
 
-SAFE MODE IS ON. You may open and read anything freely. You may run mutating \
-commands (file/archive/delete/send) ONLY when Ben asks you to in chat — that is \
-him acting through you. Never mutate on your own initiative; suggest instead.
+Acting: Ben asking IS his consent. When he tells you to archive / file / trash, \
+do it with the tool, then report in one short line and mention undo, e.g. \
+"Archived Miro + invoice — say 'undo' to restore." Act ONLY on what he asked \
+for; never touch anything else. To reply, draft it right here in his voice \
+(warm, concise, Australian; sign off 'Cheers, Ben') and offer to open the editor \
+with run_command ':rd'. Sends always become drafts (safe mode) — never claim you \
+sent anything.
 
-When Ben asks you to do something, do it with tools then confirm in one line. \
-When he asks a question, answer it. When he wants a reply drafted, write it in \
-his voice (warm, concise, Australian; sign off 'Cheers, Ben'), show it, and \
-offer to open it with :rd.
+When unsure what he means, ask. When he asks a question, just answer it.
 
 Ben's standing rules:
-{rules}"""
+{rules}
+
+{context}"""
+
+
+_THREAD_ID = {"thread_id": {"type": "string"}}
+
+
+def _tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
+    return {
+        "name": name, "description": desc,
+        "input_schema": {
+            "type": "object", "properties": props,
+            "required": required, "additionalProperties": False,
+        },
+    }
 
 
 COPILOT_CHAT_TOOLS: list[dict] = [
-    {
-        "name": "search_threads",
-        "description": "Search Gmail (Gmail query syntax). One line per thread: id, date, sender, subject, snippet.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"], "additionalProperties": False,
-        },
-    },
-    {
-        "name": "get_thread",
-        "description": "Fetch one thread in full, including message bodies.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"], "additionalProperties": False,
-        },
-    },
-    {
-        "name": "check_calendar",
-        "description": "For a thread that is a meeting invite, report Ben's live response (accepted/declined/etc.) and any conflicts around that time.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"], "additionalProperties": False,
-        },
-    },
-    {
-        "name": "open_thread",
-        "description": "Open a thread in Ben's message list + preview so he can see it. Use before suggesting an action on it.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"thread_id": {"type": "string"}},
-            "required": ["thread_id"], "additionalProperties": False,
-        },
-    },
-    {
-        "name": "run_command",
-        "description": "Fire a bem command in the main UI (e.g. ':summarise', ':rd friendly', 's', 'd', ':move Recruiting'). Mutating commands only when Ben asked for them.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"], "additionalProperties": False,
-        },
-    },
+    _tool("search_threads", "Search Gmail (query syntax). One line per thread: id, date, sender, subject, snippet.",
+          {"query": {"type": "string"}}, ["query"]),
+    _tool("get_thread", "Fetch one thread in full, including message bodies.",
+          dict(_THREAD_ID), ["thread_id"]),
+    _tool("check_calendar", "For an invite thread, report Ben's live response (accepted/declined/etc.) and any conflicts.",
+          dict(_THREAD_ID), ["thread_id"]),
+    _tool("open_thread", "Open a thread in Ben's list + preview so he can see it.",
+          dict(_THREAD_ID), ["thread_id"]),
+    _tool("move_cursor", "Drive the inbox selection so Ben watches it move — direction 'down'/'up'/'top'/'bottom'.",
+          {"direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]}}, ["direction"]),
+    _tool("scroll_preview", "Scroll the currently open email in the preview pane — 'down' or 'up'.",
+          {"direction": {"type": "string", "enum": ["down", "up"]}}, ["direction"]),
+    _tool("expand_thread", "Expand or collapse the highlighted thread in the list.", {}, []),
+    _tool("archive_thread", "Archive a specific thread out of the inbox (Ben must have asked). Reversible with undo_last.",
+          dict(_THREAD_ID), ["thread_id"]),
+    _tool("trash_thread", "Move a specific thread to Trash (Ben must have asked). Reversible with undo_last.",
+          dict(_THREAD_ID), ["thread_id"]),
+    _tool("file_thread", "File a specific thread under a label and archive it (Ben must have asked).",
+          {"thread_id": {"type": "string"}, "label": {"type": "string"}}, ["thread_id", "label"]),
+    _tool("undo_last", "Reverse your most recent archive/file/trash.", {}, []),
+    _tool("run_command", "Fire a non-mutating bem command (e.g. ':summarise', ':rd friendly'). Returns whether it was recognised.",
+          {"command": {"type": "string"}}, ["command"]),
 ]
 
 
 class CopilotExecutor:
-    """Executes Mutt's chat tools. Read tools hit Gmail; UI tools (open_thread,
-    run_command) are handed to a main-thread callback supplied by the inbox."""
+    """Executes Mutt's chat tools. Read tools hit Gmail directly; action and UI
+    tools are handed to a main-thread callback `ui_action(name, args) -> str`
+    supplied by the inbox, whose return string is fed back to the model."""
+
+    # Tools delegated to the inbox's main-thread handler.
+    _UI_TOOLS = (
+        "open_thread", "archive_thread", "trash_thread", "file_thread",
+        "undo_last", "run_command", "move_cursor", "scroll_preview", "expand_thread",
+    )
+    # Movement tools get a short pause after each so Ben can watch the autopilot
+    # move, rather than the screen jumping to its final state instantly.
+    _PACED = ("open_thread", "move_cursor", "scroll_preview", "expand_thread")
 
     def __init__(
-        self, gmail: "GmailClient", calendar, ui_action: Callable[[str, str], None],
+        self, gmail: "GmailClient", calendar, ui_action: Callable[[str, dict], str],
         threads: list["Thread"], rules: str = "",
     ) -> None:
         from bem.ai.tools import ToolExecutor
@@ -294,12 +307,14 @@ class CopilotExecutor:
             return self._read.execute(name, args)
         if name == "check_calendar":
             return self._check_calendar(args.get("thread_id", ""))
-        if name == "open_thread":
-            self._ui("open_thread", args.get("thread_id", ""))
-            return "opened in Ben's view", False
-        if name == "run_command":
-            self._ui("run_command", args.get("command", ""))
-            return f"ran: {args.get('command', '')}", False
+        if name in self._UI_TOOLS:
+            try:
+                out = self._ui(name, args) or "done"
+            except Exception as e:
+                return f"couldn't {name}: {e}", True
+            if name in self._PACED:
+                time.sleep(0.45)  # let Ben see the movement before the next step
+            return out, False
         return f"Unknown tool: {name}", True
 
     def _check_calendar(self, thread_id: str) -> tuple[str, bool]:
