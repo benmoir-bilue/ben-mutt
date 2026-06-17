@@ -100,8 +100,8 @@ Requires **Python 3.11+** (the config loader uses the stdlib `tomllib`).
 ## Installation
 
 ```bash
-git clone <your-fork-url> bilue-email
-cd bilue-email
+git clone https://github.com/benmoir-bilue/ben-mutt.git
+cd ben-mutt
 
 # Recommended: a virtual environment
 python3 -m venv .venv
