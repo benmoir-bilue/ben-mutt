@@ -42,6 +42,7 @@ from bem.tui.screens.compose import (
     launch_editor, parse_draft, AI_DRAFT_MARKER,
 )
 from bem.tui.screens.help import HelpScreen
+from bem.tui.screens._inbox_shared import _match_label
 
 log = bemlog.get()
 
@@ -122,6 +123,35 @@ class CopilotMixin:
     def _viewing_inbox(self) -> bool:
         return self._current_label_id == "INBOX" and not self._current_query
 
+    def _ensure_inbox_view(self) -> int:
+        """Main thread: make the inbox the live list, returning the
+        threads-generation to wait on. The folder switch reloads asynchronously,
+        so a caller needing the list ready should wait for the generation to
+        advance past the returned value (see ``_await_inbox_view``)."""
+        if not self._viewing_inbox():
+            self._current_label_id = "INBOX"
+            self._current_label_name = "Inbox"
+            self._current_query = ""
+            self.load_threads(label_id="INBOX")
+            self._update_status()
+        return self._threads_generation
+
+    def _await_inbox_view(self, alive) -> bool:
+        """From a worker thread: bring the inbox into view before Mutt drives it
+        so what he narrates matches what's on screen. Returns True once the inbox
+        is the live list (it may already have been)."""
+        if self.app.call_from_thread(self._viewing_inbox):
+            return True
+        gen = self.app.call_from_thread(self._ensure_inbox_view)
+        for _ in range(40):  # wait up to ~4s for the reload to land
+            if not alive():
+                return False
+            if (self._threads_generation > gen
+                    and self.app.call_from_thread(self._viewing_inbox)):
+                return True
+            time.sleep(0.1)
+        return self.app.call_from_thread(self._viewing_inbox)
+
     def _is_idle(self) -> bool:
         return (time.monotonic() - self._last_activity) > 8.0
 
@@ -183,6 +213,10 @@ class CopilotMixin:
                 f"\nCURRENTLY OPEN: id={self._current_thread.id} | "
                 f"{self._current_thread.subject}"
             )
+        lines.append(f"\nNOW SHOWING FOLDER: {self._current_label_name}")
+        if self._labels:
+            names = ", ".join(l.display_name for l in self._labels[:40])
+            lines.append(f"FOLDERS YOU CAN OPEN (change_folder): {names}")
         return "\n".join(lines)
 
     def _open_thread_by_id(self, thread_id: str) -> None:
@@ -193,6 +227,15 @@ class CopilotMixin:
             return
         except Exception:
             pass
+        # Not in the current list. Mutt's feed comes from the inbox, so if this
+        # is a feed thread, bring the inbox back into view and select it there
+        # once it loads — keeping the list and preview on the same folder rather
+        # than previewing an inbox thread over some other folder's list.
+        if (not self._viewing_inbox()
+                and any(n.thread_id == thread_id for n in self._copilot_feed)):
+            self._pending_select_id = thread_id
+            self._ensure_inbox_view()
+            return
         thread = self._thread_cache.get(thread_id)
         if thread is None:
             try:
@@ -265,6 +308,8 @@ class CopilotMixin:
         if name == "open_thread":
             self._open_thread_by_id(tid)
             return f"opened '{self._thread_subject(tid)}'"
+        if name == "change_folder":
+            return self._drive_change_folder(args.get("folder", ""))
         if name == "archive_thread":
             self._mutate_thread(tid, "archive")
             self._copilot_undo.append({"op": "archive", "thread_id": tid})
@@ -303,6 +348,32 @@ class CopilotMixin:
         return f"unknown action: {name}"
 
     # ── TUI driver primitives (main thread) ──────────────────────────────────
+
+    def _drive_change_folder(self, name: str) -> str:
+        """Switch the visible folder by name, the way pressing `c` and picking a
+        folder would. Returns an honest result string fed back to Mutt."""
+        name = (name or "").strip()
+        if not name:
+            return "which folder? (e.g. Inbox, Sent, Finance)"
+        # Match the typed name against the raw label name first (what :move
+        # uses), then the friendly display name Mutt sees in its context
+        # (so 'Drafts'/'Trash' resolve, not just 'DRAFT'/'TRASH').
+        label = _match_label(self._labels, name)
+        if label is None:
+            wanted = name.lower()
+            label = next(
+                (l for l in self._labels if l.display_name.lower() == wanted), None
+            )
+        if label is None:
+            known = ", ".join(l.display_name for l in self._labels) or "(none loaded)"
+            return f"no folder called '{name}'. Folders: {known}"
+        self._restore_cursor_row = None
+        self._current_label_id = label.id
+        self._current_label_name = label.display_name
+        self._current_query = ""
+        self.load_threads(label_id=label.id)
+        self._update_status()
+        return f"opened the {label.display_name} folder"
 
     def _drive_cursor(self, direction: str) -> None:
         ml = self.query_one(MessageList)
@@ -354,6 +425,10 @@ class CopilotMixin:
         def say(text: str) -> None:
             do(self._mutt_say, text)
 
+        # Drive what we narrate: if Ben wandered off to another folder, fold the
+        # inbox back into view first so the list on screen matches the demo.
+        if not self._await_inbox_view(alive):
+            return
         if not self._threads:
             say("Inbox's empty right now, so there's nothing to drive — load "
                 "some mail and ask me again. 🐕")

@@ -55,6 +55,7 @@ BINDINGS_TABLE = [
     (":cal-clean",   "Count calendar emails safe to delete", "Calendar"),
     (":cal-clean!",  "Trash handled invites (✓ ~ ⊘ ✗)", "Calendar"),
     (":move <label>", "Move thread (creates label)", "General"),
+    (":folder <name>", "Switch to a folder (Mutt can too)", "General"),
     (":search <q>", "Search Gmail",                  "General"),
     ("?",           "This help",                     "General"),
 ]

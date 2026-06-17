@@ -274,6 +274,12 @@ class InboxScreen(
         self._current_query = ""
         self._next_page_token: Optional[str] = None
         self._threads: list[Thread] = []
+        # Bumped on every completed folder/search load. Lets a background worker
+        # (e.g. Mutt's autopilot) tell when a reload it triggered has landed.
+        self._threads_generation = 0
+        # Set to a thread id when an action wants the cursor on that thread once
+        # the next load completes (used to re-sync the list after a folder swap).
+        self._pending_select_id: Optional[str] = None
         self._current_thread: Optional[Thread] = None
         # Set when the cursor is on a message row inside an expanded thread;
         # reply/forward then target this message instead of the newest one.
@@ -372,10 +378,19 @@ class InboxScreen(
     ) -> None:
         log.debug("_on_threads_loaded: %d threads", len(threads))
         self._threads = threads
+        self._threads_generation += 1
         self._next_page_token = next_token
         self._thread_cache.clear()
         cursor_row = self._restore_cursor_row or 0
         self._restore_cursor_row = None
+        # An action asked to open a thread that lived in another folder; now the
+        # inbox is loaded, land the cursor on it so the list and preview agree.
+        if self._pending_select_id is not None:
+            idx = next((i for i, t in enumerate(threads)
+                        if t.id == self._pending_select_id), None)
+            self._pending_select_id = None
+            if idx is not None:
+                cursor_row = idx
         try:
             msg_list = self.query_one(MessageList)
             msg_list.populate(threads, cursor_row=cursor_row)
@@ -442,7 +457,7 @@ class InboxScreen(
     _COPILOT_KNOWN_CMDS = {
         "summarise", "summarize", "summary", "triage", "explain", "reply-draft",
         "draft-reply", "rd", "ai", "ask", "search", "move", "mv", "cal-clean",
-        "cal-clean!", "sort", "zero", "tips",
+        "cal-clean!", "sort", "zero", "tips", "folder", "cd", "go", "refresh", "r",
     }
 
 
@@ -789,6 +804,9 @@ class InboxScreen(
             return
         if cmd == "search":
             self._do_search(arg)
+            return
+        if cmd in ("folder", "cd", "go"):
+            self.notify(self._drive_change_folder(arg))
             return
         if cmd in ("move", "mv"):
             self._do_move(arg)

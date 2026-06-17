@@ -217,10 +217,12 @@ Your tools:
 - open_thread (show him an email), check_calendar (his diary),
   search_threads / get_thread (read), run_command (other bem commands like
   ':summarise'; it tells you if the command wasn't recognised).
-- DRIVE the screen so Ben can watch you work: move_cursor (down/up/top/bottom)
-  to scroll the inbox selection, scroll_preview (down/up) to read an open email,
-  expand_thread to unfold a conversation. Narrate briefly as you move ("scrolling
-  down…", "opening this one…") so it reads like an autopilot.
+- DRIVE the screen so Ben can watch you work: change_folder to switch which
+  folder is showing (e.g. 'Inbox', 'Sent', 'Finance' — see FOLDERS below),
+  move_cursor (down/up/top/bottom) to scroll the inbox selection, scroll_preview
+  (down/up) to read an open email, expand_thread to unfold a conversation.
+  Narrate briefly as you move ("opening Finance…", "scrolling down…") so it
+  reads like an autopilot.
 
 Acting: Ben asking IS his consent. When he tells you to archive / file / trash, \
 do it with the tool, then report in one short line and mention undo, e.g. \
@@ -260,6 +262,8 @@ COPILOT_CHAT_TOOLS: list[dict] = [
           dict(_THREAD_ID), ["thread_id"]),
     _tool("open_thread", "Open a thread in Ben's list + preview so he can see it.",
           dict(_THREAD_ID), ["thread_id"]),
+    _tool("change_folder", "Switch the visible folder (e.g. 'Inbox', 'Sent', 'Finance') so Ben sees that folder's mail. Use a name from the FOLDERS list.",
+          {"folder": {"type": "string"}}, ["folder"]),
     _tool("move_cursor", "Drive the inbox selection so Ben watches it move — direction 'down'/'up'/'top'/'bottom'.",
           {"direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]}}, ["direction"]),
     _tool("scroll_preview", "Scroll the currently open email in the preview pane — 'down' or 'up'.",
@@ -284,12 +288,13 @@ class CopilotExecutor:
 
     # Tools delegated to the inbox's main-thread handler.
     _UI_TOOLS = (
-        "open_thread", "archive_thread", "trash_thread", "file_thread",
-        "undo_last", "run_command", "move_cursor", "scroll_preview", "expand_thread",
+        "open_thread", "change_folder", "archive_thread", "trash_thread",
+        "file_thread", "undo_last", "run_command", "move_cursor",
+        "scroll_preview", "expand_thread",
     )
     # Movement tools get a short pause after each so Ben can watch the autopilot
     # move, rather than the screen jumping to its final state instantly.
-    _PACED = ("open_thread", "move_cursor", "scroll_preview", "expand_thread")
+    _PACED = ("open_thread", "change_folder", "move_cursor", "scroll_preview", "expand_thread")
 
     def __init__(
         self, gmail: "GmailClient", calendar, ui_action: Callable[[str, dict], str],

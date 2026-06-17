@@ -208,6 +208,105 @@ async def test_inbox_copilot_drives_selection(make_message):
         assert "toggled" in scr._apply_copilot_ui("expand_thread", {})
 
 
+@pytest.mark.asyncio
+async def test_ensure_inbox_view_switches_and_bumps_generation():
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._current_label_id = "Label_Finance"
+        scr._current_query = ""
+        gen = scr._threads_generation
+        # Returns the pre-reload generation so a worker can wait for it to pass.
+        assert scr._ensure_inbox_view() == gen
+        await pilot.pause()
+        await pilot.pause()
+        assert scr._viewing_inbox()
+        assert scr._threads_generation > gen
+
+
+@pytest.mark.asyncio
+async def test_change_folder_tool_switches_folder():
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Label
+
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._labels = [
+            Label(id="INBOX", name="INBOX", type="system"),
+            Label(id="DRAFT", name="DRAFT", type="system"),
+            Label(id="Label_42", name="Finance", type="user"),
+        ]
+        # By raw/user name…
+        r = scr._apply_copilot_ui("change_folder", {"folder": "Finance"})
+        await pilot.pause()
+        assert "Finance" in r
+        assert scr._current_label_id == "Label_42" and not scr._viewing_inbox()
+        # …and by friendly display name (DRAFT -> "Drafts").
+        assert "Drafts" in scr._apply_copilot_ui("change_folder", {"folder": "Drafts"})
+        assert scr._current_label_id == "DRAFT"
+        # Unknown folder is reported honestly, with the options.
+        miss = scr._apply_copilot_ui("change_folder", {"folder": "Nope"})
+        assert "no folder called" in miss and "Finance" in miss
+
+
+@pytest.mark.asyncio
+async def test_change_folder_routes_through_executor():
+    """The executor delegates change_folder to the UI handler (not an error)."""
+    from bem.ai.copilot import CopilotExecutor
+    calls = []
+    ex = CopilotExecutor(_FakeGmail(), None, lambda n, a: calls.append((n, a)) or "opened Sent", [])
+    out, is_err = ex.execute("change_folder", {"folder": "Sent"})
+    assert calls == [("change_folder", {"folder": "Sent"})]
+    assert out == "opened Sent" and is_err is False
+
+
+@pytest.mark.asyncio
+async def test_open_feed_thread_refolds_to_inbox(make_message):
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import MessageList
+
+    inbox_thread = Thread(id="t1", snippet="invoice",
+                          messages=[make_message(id="m1", thread_id="t1", subject="Invoice")])
+
+    class _G(_FakeGmail):
+        def list_threads(self, label_id="INBOX", **kw):
+            return ([inbox_thread], None) if label_id == "INBOX" else ([], None)
+
+    app = BemApp(gmail=_G(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        # Ben wandered into another folder showing an unrelated thread.
+        scr._current_label_id = "Label_Finance"
+        scr._current_label_name = "Finance"
+        scr._current_query = ""
+        fin = Thread(id="f9", snippet="receipt",
+                     messages=[make_message(id="mf", thread_id="f9", subject="Receipt")])
+        scr._threads = [fin]
+        scr.query_one(MessageList).populate([fin])
+        await pilot.pause()
+        # Mutt's feed references an inbox thread that isn't in the Finance list.
+        scr._copilot_feed = [TriageNote("t1", "Invoice", "ben@example.com", summary="invoice")]
+
+        scr._open_thread_by_id("t1")
+        assert scr._pending_select_id == "t1"   # deferred until the reload lands
+        await pilot.pause()
+        await pilot.pause()
+        # Refolded to the inbox and selected the feed thread there.
+        assert scr._viewing_inbox()
+        ml = scr.query_one(MessageList)
+        assert ml.get_row_index("t1") == ml.cursor_row
+        assert scr._pending_select_id is None
+
+
 class _Host(App):
     def compose(self) -> ComposeResult:
         yield CopilotPanel(id="copilot")

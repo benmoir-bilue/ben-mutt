@@ -270,6 +270,7 @@ Press `?` at any time for the in-app keybinding cheatsheet.
 | `:cal-clean` | Count calendar emails that are safe to delete |
 | `:cal-clean!` | Trash all handled invite mail (accepted / maybe / declined / cancelled) |
 | `:move <label>` | Move the thread to a label (creates it if missing) |
+| `:folder <name>` (`:cd`, `:go`) | Switch to a folder by name (Mutt can drive this too) |
 | `:search <query>` | Search Gmail with native query syntax |
 | `:refresh` | Refresh the current folder |
 | `:archive` / `:delete` | Archive / trash the current thread |
@@ -338,8 +339,9 @@ not a one-shot command. It:
   *"reply to the invoice"*,
 - **chats** when you press `t`, escalating to the smart model for real
   reasoning,
-- and can even **drive the TUI** — ask it *"show me how you can control the
-  TUI"* for an autopilot demo.
+- and can even **drive the full TUI** — switch folders, move the selection,
+  open/expand threads, and scroll the preview. Ask it *"show me how you can
+  control the TUI"* for an autopilot demo.
 
 Mutt suggests; in safe mode it never acts without your say-so.
 
