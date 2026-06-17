@@ -15,6 +15,7 @@ dependencies = [
     "google-auth-httplib2>=0.2",
     "google-auth-oauthlib>=1.2",
     "anthropic>=0.40",
+    "strands-agents[anthropic]>=1.40",
     "click>=8.1",
     "rich>=13.0",
     "html2text>=2024.2.26",

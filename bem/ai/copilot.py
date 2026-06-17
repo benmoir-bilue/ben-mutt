@@ -126,6 +126,7 @@ class CopilotBrain:
     def __init__(self, api_key: str, fast_model: str, smart_model: str) -> None:
         import anthropic
         self._client = anthropic.Anthropic(api_key=api_key)
+        self._api_key = api_key
         self._fast = fast_model
         self._smart = smart_model
 
@@ -163,42 +164,56 @@ class CopilotBrain:
         context: str = "",
         max_turns: int = 8,
     ) -> str:
-        """Sonnet conversation with tools. Emits assistant commentary to the
-        feed as it goes; executes read tools against Gmail and action tools via
-        the executor's callback. `context` is the numbered feed + open thread so
-        Mutt can resolve 'archive 4' / 'the invoice'. Returns the final reply."""
+        """Sonnet conversation, run as a Strands agent with tools. Emits each
+        assistant line to the feed as it lands; the Strands event loop drives
+        tool use, calling read tools against Gmail and action/UI tools via the
+        executor. `context` is the numbered feed + open thread so Mutt can
+        resolve 'archive 4' / 'the invoice'. Returns the final reply.
+
+        The last entry in `messages` is Ben's new turn (the prompt); anything
+        before it is prior conversation seeded into the agent's history."""
+        from strands import Agent
+        from strands.models.anthropic import AnthropicModel
+        from strands.types.agent import Limits
+
         system = _CHAT_SYSTEM.format(rules=executor.rules, context=context or "(inbox quiet)")
-        last_text = ""
-        for _ in range(max_turns):
-            if is_cancelled():
-                return last_text
-            try:
-                resp = self._client.messages.create(
-                    model=self._smart, max_tokens=2048, system=system,
-                    tools=COPILOT_CHAT_TOOLS, messages=messages,
-                )
-            except Exception as e:
-                emit(f"(Mutt tripped over a wire: {e})")
-                return last_text
-            for block in resp.content:
-                if block.type == "text" and block.text.strip():
-                    last_text = block.text.strip()
-                    emit(last_text)
-            tool_uses = [b for b in resp.content if b.type == "tool_use"]
-            if not tool_uses:
-                return last_text
-            messages.append({"role": "assistant", "content": resp.content})
-            results = []
-            for tu in tool_uses:
-                if is_cancelled():
-                    return last_text
-                out, is_err = executor.execute(tu.name, dict(tu.input))
-                entry: dict = {"type": "tool_result", "tool_use_id": tu.id, "content": out}
-                if is_err:
-                    entry["is_error"] = True
-                results.append(entry)
-            messages.append({"role": "user", "content": results})
-        return last_text
+        prompt = messages[-1]["content"] if messages else ""
+        history = _to_strands_messages(messages[:-1])
+
+        state = {"last": ""}
+        agent: Optional[Agent] = None
+
+        def on_event(**kw) -> None:
+            # Emit each *complete* assistant text block (not token deltas) so the
+            # panel shows whole lines, the way the old loop did per content block.
+            msg = kw.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                for block in msg.get("content", []):
+                    text = (block.get("text") or "").strip() if isinstance(block, dict) else ""
+                    if text:
+                        state["last"] = text
+                        emit(text)
+            # Cooperative cancel: Ben hit a key / switched Mutt off mid-think.
+            if agent is not None and is_cancelled():
+                agent.cancel()
+
+        if is_cancelled():
+            return ""
+        agent = Agent(
+            model=AnthropicModel(
+                client_args={"api_key": self._api_key},
+                model_id=self._smart, max_tokens=2048,
+            ),
+            system_prompt=system,
+            tools=build_copilot_tools(executor),
+            messages=history,
+            callback_handler=on_event,
+        )
+        try:
+            agent(prompt, limits=Limits(turns=max_turns))
+        except Exception as e:
+            emit(f"(Mutt tripped over a wire: {e})")
+        return state["last"]
 
 
 _CHAT_SYSTEM = """You are Mutt, Ben's loyal inbox dog in the bem terminal email \
@@ -240,45 +255,100 @@ Ben's standing rules:
 {context}"""
 
 
-_THREAD_ID = {"thread_id": {"type": "string"}}
+def _to_strands_messages(turns: list[dict]) -> list[dict]:
+    """Convert bem's stored chat history ({'role', 'content': str}) into the
+    content-block form Strands seeds an agent's conversation with."""
+    out = []
+    for t in turns:
+        content = t.get("content", "")
+        blocks = content if isinstance(content, list) else [{"text": str(content)}]
+        out.append({"role": t.get("role", "user"), "content": blocks})
+    return out
 
 
-def _tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
-    return {
-        "name": name, "description": desc,
-        "input_schema": {
-            "type": "object", "properties": props,
-            "required": required, "additionalProperties": False,
-        },
-    }
+def build_copilot_tools(executor: "CopilotExecutor") -> list:
+    """Mutt's chat tools as Strands @tool functions. Each is a thin wrapper that
+    delegates to the executor (read tools hit Gmail; action/UI tools run on the
+    main thread). The executor's (text, is_error) result is mapped to a Strands
+    tool result so the model still sees failures as errors."""
+    from strands import tool
 
+    def run(name: str, **args) -> object:
+        out, is_err = executor.execute(name, args)
+        if is_err:
+            return {"status": "error", "content": [{"text": out}]}
+        return out
 
-COPILOT_CHAT_TOOLS: list[dict] = [
-    _tool("search_threads", "Search Gmail (query syntax). One line per thread: id, date, sender, subject, snippet.",
-          {"query": {"type": "string"}}, ["query"]),
-    _tool("get_thread", "Fetch one thread in full, including message bodies.",
-          dict(_THREAD_ID), ["thread_id"]),
-    _tool("check_calendar", "For an invite thread, report Ben's live response (accepted/declined/etc.) and any conflicts.",
-          dict(_THREAD_ID), ["thread_id"]),
-    _tool("open_thread", "Open a thread in Ben's list + preview so he can see it.",
-          dict(_THREAD_ID), ["thread_id"]),
-    _tool("change_folder", "Switch the visible folder (e.g. 'Inbox', 'Sent', 'Finance') so Ben sees that folder's mail. Use a name from the FOLDERS list.",
-          {"folder": {"type": "string"}}, ["folder"]),
-    _tool("move_cursor", "Drive the inbox selection so Ben watches it move — direction 'down'/'up'/'top'/'bottom'.",
-          {"direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]}}, ["direction"]),
-    _tool("scroll_preview", "Scroll the currently open email in the preview pane — 'down' or 'up'.",
-          {"direction": {"type": "string", "enum": ["down", "up"]}}, ["direction"]),
-    _tool("expand_thread", "Expand or collapse the highlighted thread in the list.", {}, []),
-    _tool("archive_thread", "Archive a specific thread out of the inbox (Ben must have asked). Reversible with undo_last.",
-          dict(_THREAD_ID), ["thread_id"]),
-    _tool("trash_thread", "Move a specific thread to Trash (Ben must have asked). Reversible with undo_last.",
-          dict(_THREAD_ID), ["thread_id"]),
-    _tool("file_thread", "File a specific thread under a label and archive it (Ben must have asked).",
-          {"thread_id": {"type": "string"}, "label": {"type": "string"}}, ["thread_id", "label"]),
-    _tool("undo_last", "Reverse your most recent archive/file/trash.", {}, []),
-    _tool("run_command", "Fire a non-mutating bem command (e.g. ':summarise', ':rd friendly'). Returns whether it was recognised.",
-          {"command": {"type": "string"}}, ["command"]),
-]
+    @tool
+    def search_threads(query: str) -> object:
+        """Search Gmail (Gmail query syntax). One line per thread: id, date, sender, subject, snippet."""
+        return run("search_threads", query=query)
+
+    @tool
+    def get_thread(thread_id: str) -> object:
+        """Fetch one thread in full, including message bodies."""
+        return run("get_thread", thread_id=thread_id)
+
+    @tool
+    def check_calendar(thread_id: str) -> object:
+        """For an invite thread, report Ben's live response (accepted/declined/etc.) and any conflicts."""
+        return run("check_calendar", thread_id=thread_id)
+
+    @tool
+    def open_thread(thread_id: str) -> object:
+        """Open a thread in Ben's list + preview so he can see it."""
+        return run("open_thread", thread_id=thread_id)
+
+    @tool
+    def change_folder(folder: str) -> object:
+        """Switch the visible folder (e.g. 'Inbox', 'Sent', 'Finance') so Ben sees that folder's mail. Use a name from the FOLDERS list."""
+        return run("change_folder", folder=folder)
+
+    @tool
+    def move_cursor(direction: str) -> object:
+        """Drive the inbox selection so Ben watches it move. direction is one of 'down', 'up', 'top', 'bottom'."""
+        return run("move_cursor", direction=direction)
+
+    @tool
+    def scroll_preview(direction: str) -> object:
+        """Scroll the currently open email in the preview pane. direction is 'down' or 'up'."""
+        return run("scroll_preview", direction=direction)
+
+    @tool
+    def expand_thread() -> object:
+        """Expand or collapse the highlighted thread in the list."""
+        return run("expand_thread")
+
+    @tool
+    def archive_thread(thread_id: str) -> object:
+        """Archive a specific thread out of the inbox (Ben must have asked). Reversible with undo_last."""
+        return run("archive_thread", thread_id=thread_id)
+
+    @tool
+    def trash_thread(thread_id: str) -> object:
+        """Move a specific thread to Trash (Ben must have asked). Reversible with undo_last."""
+        return run("trash_thread", thread_id=thread_id)
+
+    @tool
+    def file_thread(thread_id: str, label: str) -> object:
+        """File a specific thread under a label and archive it (Ben must have asked)."""
+        return run("file_thread", thread_id=thread_id, label=label)
+
+    @tool
+    def undo_last() -> object:
+        """Reverse your most recent archive/file/trash."""
+        return run("undo_last")
+
+    @tool
+    def run_command(command: str) -> object:
+        """Fire a non-mutating bem command (e.g. ':summarise', ':rd friendly'). Returns whether it was recognised."""
+        return run("run_command", command=command)
+
+    return [
+        search_threads, get_thread, check_calendar, open_thread, change_folder,
+        move_cursor, scroll_preview, expand_thread, archive_thread, trash_thread,
+        file_thread, undo_last, run_command,
+    ]
 
 
 class CopilotExecutor:

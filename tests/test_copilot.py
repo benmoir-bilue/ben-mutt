@@ -112,6 +112,141 @@ class TestCopilotExecutor:
         assert err and "calendar" in out.lower()
 
 
+class TestCopilotTools:
+    """build_copilot_tools wraps the executor as Strands @tool functions."""
+
+    def _ex(self):
+        calls = []
+        class Ex:
+            rules = "(none)"
+            def execute(self, name, args):
+                calls.append((name, args))
+                if name == "boom":
+                    return ("nope", True)
+                return (f"ok {name}", False)
+        return Ex(), calls
+
+    def test_specs_cover_every_tool(self):
+        from bem.ai.copilot import build_copilot_tools
+        ex, _ = self._ex()
+        names = {t.tool_name for t in build_copilot_tools(ex)}
+        assert names == {
+            "search_threads", "get_thread", "check_calendar", "open_thread",
+            "change_folder", "move_cursor", "scroll_preview", "expand_thread",
+            "archive_thread", "trash_thread", "file_thread", "undo_last",
+            "run_command",
+        }
+
+    def test_file_thread_schema_requires_label(self):
+        from bem.ai.copilot import build_copilot_tools
+        ex, _ = self._ex()
+        ft = next(t for t in build_copilot_tools(ex) if t.tool_name == "file_thread")
+        schema = ft.tool_spec["inputSchema"]["json"]
+        assert set(schema["required"]) == {"thread_id", "label"}
+
+    @pytest.mark.asyncio
+    async def test_tool_delegates_and_maps_error(self):
+        from bem.ai.copilot import build_copilot_tools
+        ex, calls = self._ex()
+        archive = next(t for t in build_copilot_tools(ex) if t.tool_name == "archive_thread")
+        last = None
+        async for ev in archive.stream(
+            {"toolUseId": "u1", "name": "archive_thread", "input": {"thread_id": "t9"}}, {}
+        ):
+            last = ev
+        assert ("archive_thread", {"thread_id": "t9"}) in calls
+        assert last["tool_result"]["status"] == "success"
+
+
+def _text_turn(text):
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+
+
+def _tool_turn(tuid, name, inp):
+    import json
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"contentBlockIndex": 0,
+            "start": {"toolUse": {"toolUseId": tuid, "name": name}}}},
+        {"contentBlockDelta": {"contentBlockIndex": 0,
+            "delta": {"toolUse": {"input": json.dumps(inp)}}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ]
+
+
+from strands.models.model import Model as _StrandsModel
+
+
+class _FakeModel(_StrandsModel):
+    """A scripted Strands model: each call to stream() replays the next turn."""
+    def __init__(self, scripts):
+        self._scripts, self._i = scripts, 0
+    def get_config(self): return {}
+    def update_config(self, **k): pass
+    async def structured_output(self, *a, **k):  # pragma: no cover
+        yield {}
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **k):
+        script = self._scripts[self._i]
+        self._i += 1
+        for ev in script:
+            yield ev
+
+
+class _ChatExec:
+    rules = "(none)"
+    def __init__(self): self.calls = []
+    def execute(self, name, args):
+        self.calls.append((name, args))
+        return (f"queued {name}", False)
+
+
+def _brain():
+    brain = copilot.CopilotBrain.__new__(copilot.CopilotBrain)
+    brain._api_key = "x"
+    brain._smart = "claude-sonnet-4-6"
+    return brain
+
+
+class TestCopilotChatLoop:
+    """CopilotBrain.chat drives a Strands agent over the copilot tools."""
+
+    def test_dispatches_tool_then_returns_reply(self, monkeypatch):
+        from strands.models import anthropic as anth
+        model = _FakeModel([
+            _tool_turn("u1", "archive_thread", {"thread_id": "t1"}),
+            _text_turn("Archived it — say 'undo' to restore."),
+        ])
+        monkeypatch.setattr(anth, "AnthropicModel", lambda **kw: model)
+        ex = _ChatExec()
+        emitted = []
+        reply = _brain().chat(
+            messages=[{"role": "user", "content": "archive 1"}],
+            executor=ex, emit=emitted.append, is_cancelled=lambda: False,
+            context="(test)",
+        )
+        assert ("archive_thread", {"thread_id": "t1"}) in ex.calls
+        assert reply == "Archived it — say 'undo' to restore."
+        assert reply in emitted
+
+    def test_cancelled_before_start_returns_empty(self, monkeypatch):
+        from strands.models import anthropic as anth
+        monkeypatch.setattr(anth, "AnthropicModel",
+                            lambda **kw: _FakeModel([_text_turn("hi")]))
+        ex = _ChatExec()
+        reply = _brain().chat(
+            messages=[{"role": "user", "content": "hello"}],
+            executor=ex, emit=lambda t: None, is_cancelled=lambda: True,
+        )
+        assert reply == "" and ex.calls == []
+
+
 class TestDemoTrigger:
     def _is(self, s):
         from bem.tui.screens.inbox import InboxScreen
