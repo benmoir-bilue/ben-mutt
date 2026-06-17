@@ -14,6 +14,8 @@ handling, AI triage, reply drafting in your own voice, an agentic inbox-zero
 mode, and **Mutt**, a live copilot that watches your inbox and can drive the UI
 for you.
 
+![bem in a terminal: the Mutt-style index and pager on the left, with Mutt — the live copilot — watching the inbox and driving the UI on the right](docs/ben-mutt.png)
+
 ```
 ┌ Inbox ────────────────────────────────┬ Mutt ──────────────────┐
 │ ● Xero          Invoice INV-0412   red │ 1. Invoice from Xero    │
