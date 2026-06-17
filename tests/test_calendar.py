@@ -22,7 +22,7 @@ MILAD_ICS = (
     "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE\r\n"
     " ;CN=Milad Dakka;X-NUM-GUESTS=0:mailto:milad@colabyr.com\r\n"
     "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=\r\n"
-    " TRUE;CN=ben.moir@bilue.com.au;X-NUM-GUESTS=0:mailto:ben.moir@bilue.com.au\r\n"
+    " TRUE;CN=user@example.com;X-NUM-GUESTS=0:mailto:user@example.com\r\n"
     "LOCATION:https://meet.google.com/ttc-zqib-frq\r\n"
     "STATUS:CONFIRMED\r\n"
     "SUMMARY:Milad <> Ben\r\n"
@@ -54,12 +54,12 @@ class TestParseIcs:
         # The second attendee's email is split across a folded line.
         inv = parse_ics(MILAD_ICS)
         emails = {a.email for a in inv.attendees}
-        assert "ben.moir@bilue.com.au" in emails
+        assert "user@example.com" in emails
         assert "milad@colabyr.com" in emails
 
     def test_attendee_partstat_lookup(self):
         inv = parse_ics(MILAD_ICS)
-        assert inv.attendee_partstat("ben.moir@bilue.com.au") == "NEEDS-ACTION"
+        assert inv.attendee_partstat("user@example.com") == "NEEDS-ACTION"
         assert inv.attendee_partstat("MILAD@colabyr.com") == "ACCEPTED"  # case-insensitive
         assert inv.attendee_partstat("nobody@example.com") is None
 
@@ -145,29 +145,29 @@ class TestResponseStatus:
 
     def test_accepted_attendee(self):
         event = {"attendees": [
-            {"email": "ben.moir@bilue.com.au", "responseStatus": "accepted"},
+            {"email": "user@example.com", "responseStatus": "accepted"},
             {"email": "milad@colabyr.com", "responseStatus": "accepted"},
         ]}
         c = self._client(event)
-        assert c.response_status("uid", "ben.moir@bilue.com.au") == "accepted"
+        assert c.response_status("uid", "user@example.com") == "accepted"
 
     def test_needs_action_attendee(self):
         event = {"attendees": [
-            {"email": "ben.moir@bilue.com.au", "responseStatus": "needsAction"},
+            {"email": "user@example.com", "responseStatus": "needsAction"},
         ]}
-        assert self._client(event).response_status("uid", "ben.moir@bilue.com.au") == "needsAction"
+        assert self._client(event).response_status("uid", "user@example.com") == "needsAction"
 
     def test_case_insensitive_email_match(self):
-        event = {"attendees": [{"email": "Ben.Moir@Bilue.com.au", "responseStatus": "declined"}]}
-        assert self._client(event).response_status("uid", "ben.moir@bilue.com.au") == "declined"
+        event = {"attendees": [{"email": "User@Example.com", "responseStatus": "declined"}]}
+        assert self._client(event).response_status("uid", "user@example.com") == "declined"
 
     def test_organizer_self_is_accepted(self):
-        event = {"attendees": [], "organizer": {"self": True, "email": "ben.moir@bilue.com.au"}}
-        assert self._client(event).response_status("uid", "ben.moir@bilue.com.au") == "accepted"
+        event = {"attendees": [], "organizer": {"self": True, "email": "user@example.com"}}
+        assert self._client(event).response_status("uid", "user@example.com") == "accepted"
 
     def test_no_event_is_not_found(self):
         from bem.calendar.client import NOT_FOUND
-        assert self._client(None).response_status("uid", "ben.moir@bilue.com.au") == NOT_FOUND
+        assert self._client(None).response_status("uid", "user@example.com") == NOT_FOUND
 
 
 class TestDispositionMark:
