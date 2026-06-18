@@ -130,6 +130,7 @@ class CopilotMixin:
     def _on_copilot_fetch(
         self, threads: list[Thread], token: Optional[str], present: bool = True,
     ) -> None:
+        was_present = self._present
         self._present = present
         new = [t for t in threads if t.id not in self._seen_thread_ids]
         self._seen_thread_ids |= {t.id for t in threads}
@@ -137,6 +138,14 @@ class CopilotMixin:
         # stays alive. next_in mirrors how the next poll will be scheduled.
         next_in = copilot_mod.poll_interval(present=present)
         self.query_one(CopilotPanel).mark_sniff(len(new), present, next_in)
+
+        # Presence transitions drive away-mode + the welcome-back briefing.
+        if was_present and not present:
+            self._enter_away()
+        elif not was_present and present:
+            self._return_from_away()
+        if not present:
+            self._away_new.extend((t.sender, t.subject) for t in new)
 
         sig = self._inbox_signature(threads)
         if sig == self._inbox_sig:
@@ -240,6 +249,55 @@ class CopilotMixin:
         old_id = prev.hero.thread_id if (prev and prev.hero) else None
         if ranking.hero and new_id != old_id:
             panel.post_note(f"↑ new top: {ranking.hero.headline}", "dim")
+
+    # ── Away mode + "while you were out" briefing ─────────────────────────────
+
+    def _enter_away(self) -> None:
+        """Ben stepped away — go quiet (read-only) and start collecting a briefing."""
+        self._away_since = time.monotonic()
+        self._away_new = []
+        self.query_one(CopilotPanel).post_note(
+            "💤 you're away — I'll keep watch and brief you when you're back.", "dim"
+        )
+
+    def _return_from_away(self) -> None:
+        """Ben's back — lead with what changed while he was out."""
+        mins = int((time.monotonic() - self._away_since) / 60) if self._away_since else 0
+        self._last_brief = self._compose_brief(mins, self._away_new)
+        self.query_one(CopilotPanel).post_mutt(self._last_brief)
+        self._away_since = None
+        self._away_new = []
+
+    def _compose_brief(self, mins: int, new_items: list) -> str:
+        when = f"~{mins}m" if mins else "a moment"
+        if not new_items:
+            return f"Welcome back 🐕 Away {when} — nothing new, all quiet."
+        lines = [f"Welcome back 🐕 Away {when} — {len(new_items)} new while you were out:"]
+        for sender, subject in new_items[:5]:
+            lines.append(f" • {sender} — {subject}")
+        if len(new_items) > 5:
+            lines.append(f" • …and {len(new_items) - 5} more")
+        r = self._copilot_ranking
+        if r and r.hero:
+            lines.append(f"Top now: {r.hero.headline}")
+        return "\n".join(lines)
+
+    def _show_brief(self) -> None:
+        """':brief' — show the current priorities on demand."""
+        if not self._copilot_on:
+            self.notify("Mutt's off — :mutt to wake him.", severity="warning")
+            return
+        panel = self.query_one(CopilotPanel)
+        r = self._copilot_ranking
+        if r and r.hero:
+            lines = [f"🐕 Top priority: {r.hero.headline}"]
+            if r.hero.action != "none":
+                lines.append(f"   ↳ {r.hero.action} — {r.hero.hint}")
+            for i, it in enumerate(r.on_deck, start=2):
+                lines.append(f"   {i}. {it.headline}")
+            panel.post_mutt("\n".join(lines))
+        else:
+            panel.post_mutt("All quiet — nothing urgent in the inbox right now. 🦴")
 
     def _copilot_begin_thinking(self, word_i: int) -> None:
         self.query_one(CopilotPanel).begin_thinking(word_i)

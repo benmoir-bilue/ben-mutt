@@ -654,6 +654,50 @@ async def test_sniff_rerank_on_inbox_change_not_just_new_mail(make_message):
 
 
 @pytest.mark.asyncio
+async def test_away_then_back_briefs_what_changed(make_message):
+    """Step away → Mutt goes quiet and collects; come back → 'while you were out'."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import CopilotPanel
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._scan_invites = lambda *a, **k: None
+        scr._copilot_curate = lambda *a, **k: None
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        scr._present = True
+        scr.query_one(CopilotPanel).start()
+        await pilot.pause()
+        mk = lambda tid: Thread(id=tid, snippet=tid,
+                                messages=[make_message(id=f"m{tid}", thread_id=tid, subject=f"Subj {tid}")])
+        # Step away; two new threads arrive while gone (across two away polls).
+        scr._on_copilot_fetch([mk("a")], None, present=False)
+        assert scr._away_since is not None
+        scr._on_copilot_fetch([mk("a"), mk("b")], None, present=False)
+        assert len(scr._away_new) == 2
+        # Come back → briefing summarises what landed.
+        scr._on_copilot_fetch([mk("a"), mk("b")], None, present=True)
+        assert scr._away_since is None
+        assert "Welcome back" in scr._last_brief and "2 new" in scr._last_brief
+
+
+def test_compose_brief_quiet_when_nothing_new():
+    from bem.tui.app import BemApp
+    from bem.config import Config
+    # _compose_brief only needs the screen instance's ranking attr.
+    scr = BemApp.__new__(BemApp)  # no init needed; call the unbound method
+    from bem.tui.screens.inbox import InboxScreen
+    inst = InboxScreen.__new__(InboxScreen)
+    inst._copilot_ranking = None
+    assert "all quiet" in InboxScreen._compose_brief(inst, 25, []).lower()
+    brief = InboxScreen._compose_brief(inst, 25, [("Marie", "SOW"), ("Xero", "Invoice")])
+    assert "2 new" in brief and "Marie — SOW" in brief
+
+
+@pytest.mark.asyncio
 async def test_on_ranking_populates_feed_and_chat_refs():
     """The Curator's ranking becomes the panel display AND the numbered list Ben
     refers to in chat (hero = [1])."""

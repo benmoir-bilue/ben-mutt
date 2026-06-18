@@ -310,6 +310,9 @@ class InboxScreen(
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)
+        self._away_since: Optional[float] = None        # monotonic when he stepped away
+        self._away_new: list = []                       # (sender, subject) seen while away
+        self._last_brief = ""                           # last while-you-were-out briefing
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -848,6 +851,9 @@ class InboxScreen(
             return
         if cmd == "focus":
             self._set_focus(arg)
+            return
+        if cmd in ("brief", "briefing"):
+            self._show_brief()
             return
         if cmd in ("summarise", "summarize", "summary"):
             self._ai_command("summarise")
