@@ -229,9 +229,17 @@ class CopilotMixin:
     def _on_ranking(self, ranking: "copilot_mod.Ranking") -> None:
         # The ranked items are also the numbered list Ben refers to in chat
         # ("archive 1", "open 2") — hero is [1].
+        prev = self._copilot_ranking
         self._copilot_ranking = ranking
         self._copilot_feed = list(ranking.items)
-        self.query_one(CopilotPanel).post_ranking(ranking)
+        panel = self.query_one(CopilotPanel)
+        panel.set_ranking(ranking)
+        # Quiet nudge (no focus steal): a one-line trace in the chat feed when the
+        # top priority actually changes, so Ben notices without being yanked.
+        new_id = ranking.hero.thread_id if ranking.hero else None
+        old_id = prev.hero.thread_id if (prev and prev.hero) else None
+        if ranking.hero and new_id != old_id:
+            panel.post_note(f"↑ new top: {ranking.hero.headline}", "dim")
 
     def _copilot_begin_thinking(self, word_i: int) -> None:
         self.query_one(CopilotPanel).begin_thinking(word_i)

@@ -15,7 +15,7 @@ helps drive to inbox-zero when nothing is urgent.
 | Priorities | Ben **declares a focus** (`:focus …`); agent ranks against it, asks when unsure |
 | Surface | **One hero + 3 on-deck** (single decision at a time) |
 | Autonomy when **away** | **Read-only**: triage + briefing only. Drafting/filing happen **only when attended + approved** (safe-mode unchanged) |
-| Memory | **Markdown** (focus/VIPs/rules, human-editable) via Strands `MemoryManager` **+ graphify** for entity/relationship cache |
+| Memory | **Markdown only** (focus/VIPs/rules, human-editable), injected into prompts. graphify dropped — the model resolves relationships from email text + injected focus/VIPs well enough; revisit a graph only if recall disappoints. |
 | Ranking models | **Haiku scores/filters the whole inbox**; **Sonnet writes the hero rationale + next action** for the top few only (cost/quality balance) |
 | Attended nudge | New hero ⇒ **quiet panel update + heartbeat blip**; never steals focus or yanks the view |
 
@@ -50,15 +50,17 @@ Composite score per thread:
 - **Negative** — newsletters / automated / notifications down-weighted
 → Hero = top composite (+ confidence); on-deck = next 3; model emits a crisp rationale + the single next action.
 
-### 4.4 Memory (Strands `MemoryManager` + markdown + graphify)
-Per-profile under `~/.config/bem[-mutt]/memory/`:
-- **Markdown stores (editable, injected into prompts):**
-  - `focus.md` — current focus, timestamped (re-ask when stale, default **7 days**)
-  - `vips.md` — VIP senders/domains + why
-  - `rules.md` — filing/handling rules (existing)
-  - `voice.md` — learned writing-voice notes
-- **graphify graph** — entity/relationship cache: people ↔ companies ↔ deals/focus ↔ threads; lets ranking answer "is this sender part of Globex?" Built/updated from inbox + sent mail (`graphify-out/` already present).
-- `MemoryManager` exposes `search_memory` (agent queries) and writes (`:focus` adds), with injection folding relevant memory into curator/chat calls. Persistence/state across restarts via `FileSessionManager`.
+### 4.4 Memory (plain markdown, injected into prompts)
+Per-profile in the config dir (`~/.config/bem[-mutt]/`):
+- `focus.md` — current focus, timestamped (re-ask when stale, default **7 days**)
+- `vips.md` — VIP senders/domains + why
+- `rules.md` — filing/handling rules (existing)
+
+`memory.memory_context()` folds these into the Curator and chat prompts. The model
+resolves "is this sender part of Globex?" from the email text + injected focus/VIPs —
+no graph needed. **graphify dropped**; revisit a relationship graph only if ranking
+recall proves insufficient. No `MemoryManager`/`FileSessionManager` either — the
+markdown files *are* the durable state, and they're human-editable.
 
 ### 4.5 Liveness & feel (layer 1 — fix first)
 - **Inbox refresh bug:** current poll only repaints when `_viewing_inbox() and _is_idle()`, so an active user on the inbox never sees updates. Fix so the inbox reliably refreshes and monitoring is visible.
@@ -87,7 +89,7 @@ Per-profile under `~/.config/bem[-mutt]/memory/`:
 ## 6. Touch points in current code
 - `bem/ai/copilot.py` — add `curate()` ranking pass; keep `chat()`; memory injection
 - `bem/ai/presence.py` *(new)* — macOS idle detection
-- `bem/ai/memory.py` *(new)* — MemoryManager + md stores + graphify adapter
+- `bem/ai/memory.py` — plain markdown stores (focus/VIPs/rules) + prompt-injection context
 - `bem/tui/widgets/copilot_panel.py` — hero card + heartbeat + briefing
 - `bem/tui/screens/inbox_copilot.py` — presence-aware cadence, briefing on return, `:focus`/`:brief`, **inbox-refresh fix**
 - `bem/config.py` — thresholds, memory paths

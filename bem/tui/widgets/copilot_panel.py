@@ -13,7 +13,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message as TMessage
-from textual.widgets import Input, Label, RichLog
+from textual.widgets import Input, Label, RichLog, Static
 
 from bem.ai import copilot
 
@@ -60,6 +60,7 @@ class CopilotPanel(Vertical):
         padding: 0;
     }
     #copilot-title { height: 1; padding: 0 1; text-style: bold; color: $accent; }
+    #copilot-hero  { height: auto; padding: 0 1; border-bottom: dashed $accent; }
     #copilot-feed  { height: 1fr; padding: 0 1; background: $surface; }
     #copilot-input { dock: bottom; border: round $accent; }
     """
@@ -84,6 +85,7 @@ class CopilotPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("🐕 Mutt — off", id="copilot-title")
+        yield Static("", id="copilot-hero")   # pinned hero + on-deck, never scrolls
         yield RichLog(id="copilot-feed", wrap=True, markup=False, highlight=False)
         yield Input(placeholder="talk to Mutt…  (Esc to leave)", id="copilot-input")
 
@@ -101,6 +103,9 @@ class CopilotPanel(Vertical):
         self.display = True
         self._new_count = 0
         self._last_sniff = time.monotonic()
+        self.query_one("#copilot-hero", Static).update(
+            Text("finding your top priority… 🐽", style="dim")
+        )
         self._feed.write(Text("🐕 Mutt is on watch. I'll bark when something matters.",
                               style="bold $accent"))
         self._feed.write(Text(
@@ -204,31 +209,38 @@ class CopilotPanel(Vertical):
                 (f" — {note.reason}" if note.reason else "", "dim italic"),
             ))
 
-    def post_ranking(self, ranking) -> None:
-        """Render the Curator's verdict: one hero + a short on-deck list."""
-        self._feed.write(Text(""))
-        if ranking.hero is None:
-            self._feed.write(Text(
-                "🐕 Inbox's quiet — nothing urgent. Say 'tidy up' when you like.",
-                style="dim",
-            ))
-            return
+    def set_ranking(self, ranking) -> None:
+        """Update the pinned hero card (one hero + on-deck). Stays put above the
+        chat feed instead of scrolling away."""
+        self.query_one("#copilot-hero", Static).update(self._hero_renderable(ranking))
+
+    @staticmethod
+    def _hero_renderable(ranking) -> Text:
+        t = Text()
+        if ranking is None or ranking.hero is None:
+            t.append("nothing urgent — inbox looks calm 🦴", style="dim")
+            return t
         h = ranking.hero
-        self._feed.write(Text.assemble(("🐕 DO THIS  ", "bold $accent"), (h.headline, "bold")))
+        t.append("▶ DO THIS\n", style="bold cyan")
+        t.append(f"  {h.headline}\n", style="bold")
         if h.why:
-            self._feed.write(Text(f"   why: {h.why}", style="dim italic"))
+            t.append(f"  why: {h.why}\n", style="dim italic")
         if h.action != "none":
-            self._feed.write(Text.assemble(
-                ("   ↳ ", "dim"), (h.action, "bold cyan"),
-                (f" — {h.hint}" if h.hint else "", "dim"),
-            ))
+            t.append("  ↳ ", style="dim")
+            t.append(h.action, style="bold cyan")
+            if h.hint:
+                t.append(f" — {h.hint}", style="dim")
+            t.append("\n")
         if ranking.on_deck:
-            self._feed.write(Text("on deck:", style="dim"))
+            t.append("on deck\n", style="dim")
             for i, item in enumerate(ranking.on_deck, start=2):
-                tail = f"  ({item.action})" if item.action != "none" else ""
-                self._feed.write(Text.assemble(
-                    (f" {i}. ", "cyan"), (item.headline, ""), (tail, "dim"),
-                ))
+                t.append(f"  {i}. ", style="cyan")
+                t.append(item.headline)
+                if item.action != "none":
+                    t.append(f"  ({item.action})", style="dim")
+                t.append("\n")
+        t.rstrip()   # in place — drops the trailing newline
+        return t
 
     def post_mutt(self, text: str) -> None:
         self._feed.write(Text(""))

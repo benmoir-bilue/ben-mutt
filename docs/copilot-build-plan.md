@@ -53,21 +53,23 @@
 **Tests:** briefing accumulation; transition presents it; **no mutations occur while away** (guard test).
 **Ship check:** lock screen ~2 min, return → briefing greets you.
 
-## Phase 5 — Action, inbox-zero & learning (polish)
-**Goal:** save minutes + get smarter.
-- **Tidy batch:** when attended + nothing urgent, group low-value (e.g. "12 newsletters — archive all?") into one approve action.
-- **Learning:** capture decisions ("always archive X", "Marie = VIP") into `rules.md`/`vips.md`.
-- **graphify entity cache:** build/update people↔companies↔deals↔threads from inbox + sent; upgrade Phase-2 entity match to graph-backed.
-- **(Conditional) adopt Strands `MemoryManager`** for search/add tools + auto-injection if it beats direct md-injection.
-**Tests:** grouping correctness; rule/VIP capture; graph query for focus match.
-**Ship check:** after catch-up, one keystroke clears the newsletter pile.
+## Phase 5 — Action, inbox-zero & learning (polish) · **markdown-native, no graphify**
+**Goal:** save minutes + get smarter, all on plain markdown.
+- **Tidy batch:** when attended + nothing urgent, Mutt offers to clear obvious noise
+  (newsletters/automated/notifications, or curate items flagged archive/delete) in one
+  go via the existing copilot archive path (with undo) — "12 newsletters, archive them?".
+- **Learning (markdown):** `:vip <matcher>` to add a VIP (writes `vips.md`); existing
+  `:rule` for filing rules; Mutt can add a VIP/rule when asked in chat. Explicit and
+  inspectable — no magic auto-learning.
+**Tests:** tidy selection picks only low-value mail; `:vip` round-trip; VIP feeds ranking.
+**Ship check:** after catch-up, "tidy up" clears the newsletter pile in one undo-able step.
+
+> **graphify dropped.** The Curator resolves relationships from email text + injected
+> focus/VIPs (proven in the Phase-2 smoke test). Revisit a relationship graph only if
+> ranking recall disappoints. No `MemoryManager`/`FileSessionManager` — markdown files
+> are the durable, human-editable state.
 
 ## Sequencing & risk
 - **Order:** 0 → 1 → 2 → 3 → 4 → 5. Phase 1 first (kills the "feels dead" pain immediately).
-- **De-risked:** graph + MemoryManager are **Phase 5**, so the product is fully usable on md-only memory and lightweight entity matching well before then.
 - **Models:** Haiku (score) + Sonnet (hero) per the locked decision; one Sonnet call per pass over ≤4 items keeps cost low.
 - **Each phase = its own commit/PR-sized chunk**, tests green, quick look before the next.
-
-## Open plan-level notes (react when checking)
-1. Memory abstraction: md-injection now, `MemoryManager` in Phase 5 — OK, or wire `MemoryManager` from the start?
-2. Phase 1 alone may be enough to make Mutt feel alive — want to **ship Phase 1 and live with it** before committing to 2+?

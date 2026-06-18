@@ -549,6 +549,21 @@ def test_heartbeat_renders_liveness():
     assert "away" in away and "brief you" in away
 
 
+def test_hero_card_renders_hero_and_on_deck():
+    """The pinned card shows the hero (with why + action) and the on-deck list."""
+    from bem.tui.widgets.copilot_panel import CopilotPanel
+    from bem.ai.copilot import Ranking, RankedItem
+    r = Ranking(
+        hero=RankedItem("h", "Marie", "SOW", "Reply to Marie on the SOW", "client waiting", "reply"),
+        on_deck=[RankedItem("d", "Xero", "Inv", "File the Xero invoice", "", "file")],
+    )
+    txt = CopilotPanel._hero_renderable(r).plain
+    assert "DO THIS" in txt and "Reply to Marie on the SOW" in txt
+    assert "why: client waiting" in txt
+    assert "on deck" in txt and "File the Xero invoice" in txt and "(file)" in txt
+    assert "calm" in CopilotPanel._hero_renderable(Ranking()).plain   # empty → quiet line
+
+
 def test_mood_emoji_reflects_state():
     """A mood emoji next to Mutt shows what he's doing — sniffing while working,
     asleep while away, a drifting idle mood while watching."""
