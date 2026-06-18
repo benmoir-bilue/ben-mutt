@@ -17,7 +17,28 @@ from textual.widgets import Input, Label, RichLog
 
 from bem.ai import copilot
 
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Mutt patrols a scent trail in the title row. 🐕 faces LEFT, so he enters from
+# the right and pads leftward: a 💨 sniff cloud in front of his nose, fresh 🐾
+# prints behind. At the left edge he loops and re-enters from the right.
+WALK_SLOTS = 8
+
+
+def _walk_strip(step: int, slots: int = WALK_SLOTS) -> str:
+    """One frame of the walking dog as a space-joined trail of `slots` cells."""
+    cycle = slots + 2                  # a short off-screen gap before re-entering
+    pos = (slots - 1) - (step % cycle)  # start at the right edge, move left
+    cells = ["·"] * slots
+
+    def put(i: int, glyph: str) -> None:
+        if 0 <= i < slots:
+            cells[i] = glyph
+
+    put(pos + 2, "🐾")   # prints behind (to his right — where he came from)
+    put(pos + 1, "🐾")
+    put(pos, "🐕")        # the dog, facing left
+    put(pos - 1, "💨")    # sniff cloud in front (to his left — where he's headed)
+    return " ".join(cells)
+
 
 _URGENCY_STYLE = {"high": "bold red", "normal": "", "low": "dim"}
 _URGENCY_GLYPH = {"high": "🔴", "normal": "•", "low": "·"}
@@ -124,19 +145,25 @@ class CopilotPanel(Vertical):
         self._present = present
 
     def _tick(self) -> None:
-        if self.state == "thinking":
-            self._frame = (self._frame + 1) % len(SPINNER)
-            elapsed = int(time.monotonic() - self._started)
-            word = copilot.status_word(self._word_i)
-            self.query_one("#copilot-title", Label).update(
-                f"🐕 {SPINNER[self._frame]} {word}… ({elapsed}s)"
-            )
-        elif self.state == "idle":
-            # Live heartbeat — countdown ticks so it never looks frozen.
-            self.query_one("#copilot-title", Label).update(self._render_heartbeat())
+        if self.state == "off":
+            return
+        self._frame += 1
+        self.query_one("#copilot-title", Label).update(self._render_title())
 
-    def _render_heartbeat(self) -> str:
-        bits = ["👀 watching" if self._present else "💤 away"]
+    def _render_title(self) -> str:
+        """The walking dog + a state-dependent caption. The trail animates in
+        both states so the panel never looks frozen; the caption changes."""
+        strip = _walk_strip(self._frame)
+        if self.state == "thinking":
+            word = copilot.status_word(self._word_i)
+            elapsed = int(time.monotonic() - self._started)
+            caption = f"{word} the inbox… ({elapsed}s)"
+        else:
+            caption = self._heartbeat_suffix()
+        return f"{strip}  {caption}"
+
+    def _heartbeat_suffix(self) -> str:
+        bits = ["watching" if self._present else "💤 away"]
         if self._new_count:
             bits.append(f"{self._new_count} new")
         if self._last_sniff is not None:
@@ -145,13 +172,10 @@ class CopilotPanel(Vertical):
             bits.append("I'll brief you when you're back")
         elif self._next_sniff_at is not None:
             bits.append(f"next {max(0, int(self._next_sniff_at - time.monotonic()))}s")
-        return "🐕 " + " · ".join(bits)
+        return " · ".join(bits)
 
     def _set_title(self, suffix: str = "watching") -> None:
-        if self.state == "idle":
-            self.query_one("#copilot-title", Label).update(self._render_heartbeat())
-        else:
-            self.query_one("#copilot-title", Label).update(f"🐕 Mutt — {suffix}")
+        self.query_one("#copilot-title", Label).update(self._render_title())
 
     # ── Feed ────────────────────────────────────────────────────────────────
 

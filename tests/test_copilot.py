@@ -538,15 +538,29 @@ async def test_mutt_refuses_to_open_over_a_live_agent(monkeypatch):
 
 
 def test_heartbeat_renders_liveness():
-    """The idle title is a live heartbeat — proof Mutt is watching."""
+    """The title caption is a live heartbeat — proof Mutt is watching."""
     from bem.tui.widgets.copilot_panel import CopilotPanel
     p = CopilotPanel()
     p.mark_sniff(2, present=True, next_in=60)
-    hb = p._render_heartbeat()
-    assert "👀 watching" in hb and "2 new" in hb and "next" in hb and "sniffed" in hb
+    hb = p._heartbeat_suffix()
+    assert "watching" in hb and "2 new" in hb and "next" in hb and "sniffed" in hb
     p.set_present(False)
-    away = p._render_heartbeat()
-    assert "💤 away" in away and "brief you" in away
+    away = p._heartbeat_suffix()
+    assert "away" in away and "brief you" in away
+
+
+def test_walking_dog_faces_left_cloud_front_prints_behind():
+    """🐕 enters from the right, 💨 cloud in front (left), 🐾 prints behind (right)."""
+    from bem.tui.widgets.copilot_panel import _walk_strip, WALK_SLOTS
+    # Step 0: dog enters at the right edge.
+    assert _walk_strip(0).split(" ").index("🐕") == WALK_SLOTS - 1
+    # A few steps in, dog is mid-trail with cloud ahead and prints behind.
+    cells = _walk_strip(2).split(" ")
+    d = cells.index("🐕")
+    assert cells[d - 1] == "💨"          # cloud in front (to his left)
+    assert cells[d + 1] == "🐾"          # fresh print behind (to his right)
+    # He moves leftward as steps advance.
+    assert _walk_strip(3).split(" ").index("🐕") < _walk_strip(1).split(" ").index("🐕")
 
 
 @pytest.mark.asyncio
