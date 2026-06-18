@@ -173,6 +173,32 @@ class CopilotPanel(Vertical):
                 (f" — {note.reason}" if note.reason else "", "dim italic"),
             ))
 
+    def post_ranking(self, ranking) -> None:
+        """Render the Curator's verdict: one hero + a short on-deck list."""
+        self._feed.write(Text(""))
+        if ranking.hero is None:
+            self._feed.write(Text(
+                "🐕 Inbox's quiet — nothing urgent. Say 'tidy up' when you like.",
+                style="dim",
+            ))
+            return
+        h = ranking.hero
+        self._feed.write(Text.assemble(("🐕 DO THIS  ", "bold $accent"), (h.headline, "bold")))
+        if h.why:
+            self._feed.write(Text(f"   why: {h.why}", style="dim italic"))
+        if h.action != "none":
+            self._feed.write(Text.assemble(
+                ("   ↳ ", "dim"), (h.action, "bold cyan"),
+                (f" — {h.hint}" if h.hint else "", "dim"),
+            ))
+        if ranking.on_deck:
+            self._feed.write(Text("on deck:", style="dim"))
+            for i, item in enumerate(ranking.on_deck, start=2):
+                tail = f"  ({item.action})" if item.action != "none" else ""
+                self._feed.write(Text.assemble(
+                    (f" {i}. ", "cyan"), (item.headline, ""), (tail, "dim"),
+                ))
+
     def post_mutt(self, text: str) -> None:
         self._feed.write(Text(""))
         for i, line in enumerate(text.splitlines() or [""]):

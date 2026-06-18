@@ -304,7 +304,8 @@ class InboxScreen(
         self._copilot_chat: list[dict] = []           # rolling chat history
         self._last_activity: float = 0.0              # monotonic; for idle detection
         self._copilot_word = 0                        # rotates status words
-        self._copilot_feed: list = []                 # ordered TriageNotes (the [n] refs)
+        self._copilot_feed: list = []                 # ranked items, the [n] refs in chat
+        self._copilot_ranking = None                   # latest Curator Ranking
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)

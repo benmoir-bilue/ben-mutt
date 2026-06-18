@@ -583,6 +583,50 @@ async def test_background_refresh_keeps_selection(make_message):
 
 
 @pytest.mark.asyncio
+async def test_on_ranking_populates_feed_and_chat_refs():
+    """The Curator's ranking becomes the panel display AND the numbered list Ben
+    refers to in chat (hero = [1])."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.tui.widgets import CopilotPanel
+    from bem.ai.copilot import Ranking, RankedItem
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr.query_one(CopilotPanel).start()
+        await pilot.pause()
+        r = Ranking(
+            hero=RankedItem("h", "Marie", "SOW", "Reply to Marie on the SOW", "client waiting", "reply"),
+            on_deck=[RankedItem("d", "Xero", "Invoice", "File the Xero invoice", "", "file")],
+        )
+        scr._on_ranking(r)
+        await pilot.pause()
+        assert scr._copilot_ranking is r
+        assert [i.thread_id for i in scr._copilot_feed] == ["h", "d"]
+        ctx = scr._copilot_context()
+        assert "[1]" in ctx and "Reply to Marie on the SOW" in ctx
+
+
+@pytest.mark.asyncio
+async def test_focus_change_recurates_when_watching(tmp_path, monkeypatch):
+    from bem.ai import memory
+    monkeypatch.setattr(memory, "FOCUS_FILE", tmp_path / "focus.md")
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        recurated = []
+        scr._copilot_curate = lambda threads: recurated.append(threads)
+        scr._set_focus("closing Globex")
+        assert recurated, "setting focus should re-rank while watching the inbox"
+
+
+@pytest.mark.asyncio
 async def test_panel_mounts_and_posts():
     app = _Host()
     async with app.run_test() as pilot:

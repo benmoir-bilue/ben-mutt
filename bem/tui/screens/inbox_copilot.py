@@ -83,7 +83,7 @@ class CopilotMixin:
         # leaving a static title until the first poll lands.
         panel.mark_sniff(0, self._present, copilot_mod.poll_interval(present=self._present))
         self.notify("Mutt is on watch 🐕")
-        self._copilot_triage_batch(self._threads[:5])
+        self._copilot_curate(self._threads)
         self._schedule_copilot_poll()
 
     def _schedule_copilot_poll(self) -> None:
@@ -137,7 +137,7 @@ class CopilotMixin:
             self._next_page_token = token
             ml.populate(threads, cursor_key=keep)
             self._scan_invites([t.id for t in threads])
-        self._copilot_triage_batch(new[:5])
+        self._copilot_curate(threads)
 
     def _viewing_inbox(self) -> bool:
         return self._current_label_id == "INBOX" and not self._current_query
@@ -184,38 +184,44 @@ class CopilotMixin:
             return "a calendar invite awaiting your RSVP"
         return ""
 
-    @work(thread=True, exclusive=True, group="copilot-triage", exit_on_error=False)
-    def _copilot_triage_batch(self, threads: list[Thread]) -> None:
+    @work(thread=True, exclusive=True, group="copilot-curate", exit_on_error=False)
+    def _copilot_curate(self, threads: list[Thread]) -> None:
+        """Rank the whole inbox into one hero + on-deck (replaces the old
+        per-email triage feed). Runs on a worker; renders on the main thread."""
         worker = get_current_worker()
-        rules = _load_rules()
+        if not threads or not self._copilot_on:
+            return
+        from bem.ai import memory
+        self._copilot_word += 1
+        self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
+        hints = {}
         for t in threads:
-            if worker.is_cancelled or not self._copilot_on:
-                break
-            self._copilot_word += 1
-            self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
             hint = self._copilot_calendar_hint(t)
-            try:
-                note = self._copilot.triage(t, rules=rules, calendar_hint=hint)
-            except Exception as e:
-                log.debug("copilot triage failed: %s", e)
-                continue
-            if not worker.is_cancelled:
-                self.app.call_from_thread(self._on_triage_note, note)
+            if hint:
+                hints[t.id] = hint
+        try:
+            ranking = self._copilot.curate(
+                threads, memory_ctx=memory.memory_context(), calendar_hints=hints,
+            )
+        except Exception as e:
+            log.debug("copilot curate failed: %s", e)
+            ranking = None
+        if not worker.is_cancelled and ranking is not None:
+            self.app.call_from_thread(self._on_ranking, ranking)
         self.app.call_from_thread(self._copilot_end_thinking)
+
+    def _on_ranking(self, ranking: "copilot_mod.Ranking") -> None:
+        # The ranked items are also the numbered list Ben refers to in chat
+        # ("archive 1", "open 2") — hero is [1].
+        self._copilot_ranking = ranking
+        self._copilot_feed = list(ranking.items)
+        self.query_one(CopilotPanel).post_ranking(ranking)
 
     def _copilot_begin_thinking(self, word_i: int) -> None:
         self.query_one(CopilotPanel).begin_thinking(word_i)
 
     def _copilot_end_thinking(self) -> None:
         self.query_one(CopilotPanel).end_thinking()
-
-    def _on_triage_note(self, note: "copilot_mod.TriageNote") -> None:
-        self._copilot_feed.append(note)
-        number = len(self._copilot_feed)
-        self.query_one(CopilotPanel).post_triage(note, number)
-        # Auto-open only the genuinely urgent, and only when the user is idle.
-        if note.urgency == "high" and self._is_idle():
-            self._open_thread_by_id(note.thread_id)
 
     def _copilot_context(self) -> str:
         """The numbered feed + currently-open thread, so Mutt can resolve
@@ -225,7 +231,7 @@ class CopilotMixin:
         for idx in range(max(0, len(feed) - 20), len(feed)):
             n = feed[idx]
             lines.append(
-                f"[{idx + 1}] id={n.thread_id} | {n.sender} | {n.subject} — {n.summary}"
+                f"[{idx + 1}] id={n.thread_id} | {n.sender} | {n.subject} — {n.headline}"
             )
         if self._current_thread is not None:
             lines.append(
@@ -294,6 +300,9 @@ class CopilotMixin:
             return
         memory.save_focus(text)
         self.notify(f"Focus set: {text} 🐕")
+        # Re-rank against the new focus right away when Mutt's watching the inbox.
+        if self._copilot_on and self._viewing_inbox():
+            self._copilot_curate(self._threads)
 
     def on_copilot_panel_chat_submitted(self, event: CopilotPanel.ChatSubmitted) -> None:
         if self._is_demo_request(event.text):

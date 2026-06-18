@@ -44,6 +44,8 @@ ACTION_HINTS = {
     "file":    "press s to file",
     "archive": "press e to archive",
     "delete":  "press d to delete",
+    "rsvp":    "press A accept / X decline",
+    "read":    "press Enter to open",
     "none":    "",
 }
 
@@ -126,6 +128,139 @@ def _coerce_note(raw: str, thread: "Thread") -> TriageNote:
     return note
 
 
+# ── The Curator: rank the whole inbox → one hero + a short on-deck ──────────
+
+# Old mail decays: an unactioned thread loses half its weight every this-many
+# days, so last month's "urgent" can't outrank today's real ask.
+DECAY_HALF_LIFE_DAYS = 5.0
+MAX_CANDIDATES = 25   # most-recent threads weighed per pass (cost ceiling)
+HERO_POOL = 4         # top-scored items the smart model ranks + writes up
+
+
+@dataclass
+class Candidate:
+    thread_id: str
+    sender: str
+    subject: str
+    snippet: str
+    age_days: float
+    unread: bool
+    calendar_hint: str = ""
+
+
+@dataclass
+class RankedItem:
+    thread_id: str
+    sender: str
+    subject: str
+    headline: str          # what it is + the ask
+    why: str = ""          # why it matters now
+    action: str = "none"   # reply|file|archive|delete|rsvp|read|none
+    score: float = 0.0
+
+    @property
+    def hint(self) -> str:
+        return ACTION_HINTS.get(self.action, "")
+
+
+@dataclass
+class Ranking:
+    hero: Optional[RankedItem] = None
+    on_deck: list[RankedItem] = None  # up to 3
+    considered: int = 0
+
+    def __post_init__(self):
+        if self.on_deck is None:
+            self.on_deck = []
+
+    @property
+    def items(self) -> list[RankedItem]:
+        """Hero first, then on-deck — the numbered list Ben refers to in chat."""
+        return ([self.hero] if self.hero else []) + list(self.on_deck)
+
+
+def _decay(age_days: float, half_life: float = DECAY_HALF_LIFE_DAYS) -> float:
+    return 0.5 ** (max(0.0, age_days) / half_life)
+
+
+def _curate_candidates(
+    threads: list["Thread"], now: Optional[datetime] = None,
+    hints: Optional[dict] = None, limit: int = MAX_CANDIDATES,
+) -> list[Candidate]:
+    """The most-recent inbox threads, compacted for the scoring pass."""
+    now = now or datetime.now(timezone.utc)
+    hints = hints or {}
+    ordered = sorted(
+        threads, key=lambda t: t.date or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[:limit]
+    out = []
+    for t in ordered:
+        age = (now - t.date).total_seconds() / 86400 if t.date else 30.0
+        out.append(Candidate(
+            thread_id=t.id, sender=t.sender, subject=t.subject,
+            snippet=(t.snippet or "")[:140], age_days=max(0.0, age),
+            unread=t.is_unread, calendar_hint=hints.get(t.id, ""),
+        ))
+    return out
+
+
+def _extract_json(raw: str):
+    """Best-effort parse of a model reply that should be JSON (tolerates ``` fences
+    and surrounding prose). Returns the parsed object or None."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        nl = text.find("\n")
+        if nl != -1:
+            text = text[nl + 1:]
+    # Parse around whichever delimiter appears FIRST, so an object that contains
+    # an array (e.g. the hero with its on_deck list) isn't mis-read as the array.
+    starts = [(text.find(o), o, c) for o, c in (("{", "}"), ("[", "]")) if text.find(o) != -1]
+    if not starts:
+        return None
+    i, _open, close_c = min(starts)
+    j = text.rfind(close_c)
+    if 0 <= i < j:
+        try:
+            return json.loads(text[i:j + 1])
+        except (ValueError, json.JSONDecodeError):
+            return None
+    return None
+
+
+_CURATE_SCORE_SYSTEM = """You are Mutt, ranking Ben's inbox. For EACH email, score \
+how much it deserves Ben's attention RIGHT NOW from 0-100.
+
+Weigh up:
+- matches Ben's current focus → much higher
+- VIP sender (board/investor/key customer/family) → higher
+- a real person genuinely waiting on Ben's reply → higher
+- a deadline or time-sensitive ask → higher
+- newsletters, automated notices, receipts, notifications → much lower
+
+Output ONLY a JSON array, no prose:
+[{{"id":"<thread_id>","score":<0-100>,"action":"reply|file|archive|delete|rsvp|read|none"}}]
+
+What Mutt knows:
+{memory}"""
+
+_CURATE_HERO_SYSTEM = """You are Mutt, Ben's sharp chief of staff. From these top \
+candidates, pick THE single most important thing for Ben to do right now (the hero) \
+and the next three (on-deck).
+
+For the hero: a crisp headline (what it is + the ask, <=14 words), why it matters now \
+(<=12 words), and the action verb. For each on-deck item: its id, a one-line headline, \
+and the action.
+
+Output ONLY JSON, no prose:
+{{"hero":{{"id":"...","headline":"...","why":"...","action":"reply|file|archive|delete|rsvp|read|none"}},
+"on_deck":[{{"id":"...","headline":"...","action":"..."}}]}}
+
+Honour Ben's focus, VIPs and rules below.
+{memory}"""
+
+
 class CopilotBrain:
     def __init__(self, api_key: str, fast_model: str, smart_model: str) -> None:
         import anthropic
@@ -158,6 +293,127 @@ class CopilotBrain:
         except Exception:
             raw = ""
         return _coerce_note(raw, thread)
+
+    def curate(
+        self,
+        threads: list["Thread"],
+        memory_ctx: str = "",
+        calendar_hints: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> Ranking:
+        """Rank the whole inbox into one hero + 3 on-deck. Cheap Haiku pass scores
+        every candidate; old mail is decayed in code; the smart model then writes
+        the hero + on-deck for the top few. Degrades gracefully at each step."""
+        candidates = _curate_candidates(threads, now=now, hints=calendar_hints)
+        if not candidates:
+            return Ranking(considered=0)
+        by_id = {c.thread_id: c for c in candidates}
+        scores = self._score_pass(candidates, memory_ctx)  # id -> (score, action)
+        ranked = sorted(
+            candidates,
+            key=lambda c: scores.get(c.thread_id, (0, "none"))[0] * _decay(c.age_days),
+            reverse=True,
+        )
+        top = ranked[:HERO_POOL]
+        ranking = self._compose_hero(top, by_id, scores, memory_ctx)
+        ranking.considered = len(candidates)
+        return ranking
+
+    def _score_pass(self, candidates: list[Candidate], memory_ctx: str) -> dict:
+        """Haiku scores every candidate. Returns {thread_id: (score, action)};
+        empty on failure (curate then falls back to recency)."""
+        lines = "\n".join(
+            f"{c.thread_id} | {c.sender} | {c.subject} | {int(c.age_days)}d old"
+            + (" | unread" if c.unread else "")
+            + (f" | calendar: {c.calendar_hint}" if c.calendar_hint else "")
+            + f" | {c.snippet}"
+            for c in candidates
+        )
+        try:
+            resp = self._client.messages.create(
+                model=self._fast, max_tokens=1500,
+                system=_CURATE_SCORE_SYSTEM.format(memory=memory_ctx or "(nothing yet)"),
+                messages=[{"role": "user", "content": lines}],
+            )
+            data = _extract_json(resp.content[0].text if resp.content else "")
+        except Exception:
+            data = None
+        out: dict = {}
+        if isinstance(data, list):
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                tid = str(row.get("id", ""))
+                if tid not in {c.thread_id for c in candidates}:
+                    continue
+                try:
+                    score = max(0.0, min(100.0, float(row.get("score", 0))))
+                except (TypeError, ValueError):
+                    score = 0.0
+                action = str(row.get("action", "none")).lower()
+                out[tid] = (score, action if action in ACTION_HINTS else "none")
+        return out
+
+    def _compose_hero(
+        self, top: list[Candidate], by_id: dict, scores: dict, memory_ctx: str,
+    ) -> Ranking:
+        """Smart model writes the hero + on-deck for the top candidates. Falls
+        back to a recency/score ordering if the model output is unusable."""
+        def fallback() -> Ranking:
+            items = [
+                RankedItem(
+                    thread_id=c.thread_id, sender=c.sender, subject=c.subject,
+                    headline=c.subject, why="", action=scores.get(c.thread_id, (0, "none"))[1],
+                    score=scores.get(c.thread_id, (0, "none"))[0] * _decay(c.age_days),
+                )
+                for c in top
+            ]
+            return Ranking(hero=items[0] if items else None, on_deck=items[1:4])
+
+        if not top:
+            return Ranking()
+        digest = "\n".join(
+            f"{c.thread_id} | {c.sender} | {c.subject}"
+            + (f" | calendar: {c.calendar_hint}" if c.calendar_hint else "")
+            + f"\n    {c.snippet}"
+            for c in top
+        )
+        try:
+            resp = self._client.messages.create(
+                model=self._smart, max_tokens=800,
+                system=_CURATE_HERO_SYSTEM.format(memory=memory_ctx or "(nothing yet)"),
+                messages=[{"role": "user", "content": digest}],
+            )
+            data = _extract_json(resp.content[0].text if resp.content else "")
+        except Exception:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("hero"), dict):
+            return fallback()
+
+        def build(raw: dict) -> Optional[RankedItem]:
+            tid = str(raw.get("id", ""))
+            c = by_id.get(tid)
+            if c is None:
+                return None
+            action = str(raw.get("action", "none")).lower()
+            return RankedItem(
+                thread_id=tid, sender=c.sender, subject=c.subject,
+                headline=str(raw.get("headline", "")).strip() or c.subject,
+                why=str(raw.get("why", "")).strip(),
+                action=action if action in ACTION_HINTS else "none",
+                score=scores.get(tid, (0, "none"))[0] * _decay(c.age_days),
+            )
+
+        hero = build(data["hero"])
+        if hero is None:
+            return fallback()
+        on_deck = []
+        for raw in (data.get("on_deck") or [])[:3]:
+            if isinstance(raw, dict):
+                item = build(raw)
+                if item and item.thread_id != hero.thread_id:
+                    on_deck.append(item)
+        return Ranking(hero=hero, on_deck=on_deck)
 
     def chat(
         self,
