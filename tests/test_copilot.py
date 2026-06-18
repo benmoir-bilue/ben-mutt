@@ -563,7 +563,7 @@ async def test_background_refresh_keeps_selection(make_message):
         scr = app.screen
         scr._copilot_on = True
         scr._scan_invites = lambda *a, **k: None
-        scr._copilot_triage_batch = lambda *a, **k: None
+        scr._copilot_curate = lambda *a, **k: None
         scr._current_label_id, scr._current_query = "INBOX", ""
         t1 = Thread(id="t1", snippet="a", messages=[make_message(id="m1", thread_id="t1", subject="One")])
         t2 = Thread(id="t2", snippet="b", messages=[make_message(id="m2", thread_id="t2", subject="Two")])
@@ -580,6 +580,37 @@ async def test_background_refresh_keeps_selection(make_message):
         await pilot.pause()
         assert ml.get_row_index("t3") >= 0          # refreshed: new thread is shown
         assert ml.selected_key() == "t2"            # cursor stayed put
+
+
+@pytest.mark.asyncio
+async def test_sniff_rerank_on_inbox_change_not_just_new_mail(make_message):
+    """The reported bug: after Ben actions the hero, the next sniff finds no NEW
+    mail — but the inbox changed, so the Curator must still re-rank. And an
+    unchanged inbox must NOT burn a re-rank (heartbeat only)."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._scan_invites = lambda *a, **k: None
+        scr._current_label_id, scr._current_query = "Other", "x"   # not viewing inbox
+        recurated = []
+        scr._copilot_curate = lambda threads: recurated.append(list(threads))
+        mk = lambda tid: Thread(id=tid, snippet=tid,
+                                messages=[make_message(id=f"m{tid}", thread_id=tid)])
+        t1, t2, t3 = mk("t1"), mk("t2"), mk("t3")
+        scr._seen_thread_ids = {"t1", "t2", "t3"}
+        scr._inbox_sig = scr._inbox_signature([t1, t2, t3])
+        # Ben archived t1 — next poll returns the inbox without it, no NEW mail.
+        scr._on_copilot_fetch([t2, t3], None, present=True)
+        assert recurated, "inbox shrank (archived) → re-rank even with no new mail"
+        # A subsequent identical sniff must not re-rank again.
+        recurated.clear()
+        scr._on_copilot_fetch([t2, t3], None, present=True)
+        assert not recurated, "nothing moved → heartbeat only, no re-rank"
 
 
 @pytest.mark.asyncio

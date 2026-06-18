@@ -306,6 +306,7 @@ class InboxScreen(
         self._copilot_word = 0                        # rotates status words
         self._copilot_feed: list = []                 # ranked items, the [n] refs in chat
         self._copilot_ranking = None                   # latest Curator Ranking
+        self._inbox_sig = None                          # inbox fingerprint, to re-rank on change
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)

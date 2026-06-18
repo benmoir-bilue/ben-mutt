@@ -76,6 +76,7 @@ class CopilotMixin:
         # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
         # then give an initial digest of the top few threads already sitting here.
         self._seen_thread_ids = {t.id for t in self._threads}
+        self._inbox_sig = self._inbox_signature(self._threads)
         from bem.ai import presence
         self._present = presence.is_present()
         panel.start()
@@ -116,6 +117,16 @@ class CopilotMixin:
         if not worker.is_cancelled:
             self.app.call_from_thread(self._on_copilot_fetch, threads, token, present)
 
+    @staticmethod
+    def _inbox_signature(threads: list[Thread]) -> frozenset:
+        """A fingerprint of the inbox that changes when mail arrives, leaves
+        (archived/filed/trashed), is read, or gains a reply — so the Curator
+        re-ranks after Ben acts on something, not only on brand-new mail."""
+        return frozenset(
+            (t.id, t.is_unread, t.last_message.id if t.last_message else "")
+            for t in threads
+        )
+
     def _on_copilot_fetch(
         self, threads: list[Thread], token: Optional[str], present: bool = True,
     ) -> None:
@@ -126,10 +137,15 @@ class CopilotMixin:
         # stays alive. next_in mirrors how the next poll will be scheduled.
         next_in = copilot_mod.poll_interval(present=present)
         self.query_one(CopilotPanel).mark_sniff(len(new), present, next_in)
-        if not new:
-            return
-        # Repaint the inbox in place, keeping the cursor on the same email by id
-        # so new mail lands without yanking the view mid-navigation.
+
+        sig = self._inbox_signature(threads)
+        if sig == self._inbox_sig:
+            return  # nothing moved — heartbeat only, no re-rank
+        self._inbox_sig = sig
+
+        # The inbox changed (new mail, or Ben actioned/read/replied to something).
+        # Repaint in place, keeping the cursor on the same email by id, then
+        # re-rank so a finished hero drops and the next priority surfaces.
         if self._viewing_inbox():
             ml = self.query_one(MessageList)
             keep = ml.selected_key()
