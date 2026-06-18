@@ -58,6 +58,10 @@ class CopilotMixin:
             panel.stop()
             self.notify("Mutt is off")
             return
+        if self.query_one(AgentPanel).display:
+            # They share the right column — don't stack Mutt on a live agent run.
+            self.notify("Agent panel is open — press Esc to close it first.", severity="warning")
+            return
         if not self.config.anthropic_api_key:
             self.notify("ANTHROPIC_API_KEY not set — Mutt needs it.", severity="warning")
             return
@@ -253,6 +257,28 @@ class CopilotMixin:
             self.notify("Mutt is off — :copilot to wake him.", severity="warning")
             return
         panel.focus_input()
+
+    def _set_focus(self, arg: str) -> None:
+        """':focus <text>' sets the week's priority Mutt ranks against; ':focus'
+        shows the current one; ':focus clear' resets it."""
+        from bem.ai import memory
+        text = arg.strip()
+        if not text:
+            foc = memory.load_focus()
+            if foc and foc.text:
+                age = foc.age_days()
+                when = f" (set {age}d ago)" if age is not None else ""
+                stale = " — getting stale, reset it?" if foc.is_stale() else ""
+                self.notify(f"Focus{when}: {foc.text}{stale}")
+            else:
+                self.notify("No focus set — ':focus <what you're on>' to set one.")
+            return
+        if text.lower() in ("clear", "none", "off", "reset"):
+            memory.clear_focus()
+            self.notify("Focus cleared 🐕")
+            return
+        memory.save_focus(text)
+        self.notify(f"Focus set: {text} 🐕")
 
     def on_copilot_panel_chat_submitted(self, event: CopilotPanel.ChatSubmitted) -> None:
         if self._is_demo_request(event.text):
@@ -491,3 +517,11 @@ class CopilotMixin:
         # Track activity so Mutt knows when the user is busy (don't grab focus
         # or yank the view) versus idle (safe to auto-open urgent mail).
         self._last_activity = time.monotonic()
+        # "Esc to leave" (as Mutt's welcome line promises): close the panel when
+        # it's on screen. The chat input's own Esc yields focus first and stops
+        # the event, so this only fires from the inbox — one Esc shuts Mutt.
+        if event.key == "escape" and self._copilot_on:
+            panel = self.query_one(CopilotPanel)
+            if panel.display:
+                self._toggle_copilot()
+                event.stop()

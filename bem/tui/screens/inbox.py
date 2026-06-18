@@ -306,6 +306,7 @@ class InboxScreen(
         self._copilot_word = 0                        # rotates status words
         self._copilot_feed: list = []                 # ordered TriageNotes (the [n] refs)
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
+        self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -841,6 +842,9 @@ class InboxScreen(
             return
         if cmd == "rule":
             self._add_rule(arg)
+            return
+        if cmd == "focus":
+            self._set_focus(arg)
             return
         if cmd in ("summarise", "summarize", "summary"):
             self._ai_command("summarise")

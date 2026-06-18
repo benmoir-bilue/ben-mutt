@@ -13,6 +13,9 @@ TOKEN_FILE = CONFIG_DIR / "token.json"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 RULES_FILE = CONFIG_DIR / "rules.md"
 TIPS_FILE = CONFIG_DIR / "folder_tips.md"
+# Copilot ("Chief of Staff") memory — plain, human-editable markdown.
+FOCUS_FILE = CONFIG_DIR / "focus.md"   # what Ben is prioritising right now (:focus)
+VIPS_FILE = CONFIG_DIR / "vips.md"     # senders/domains that always jump the queue
 
 # Calendar write scope is requested up front so detecting invite status now and
 # accepting/declining invites later share a single consent. Changing this list

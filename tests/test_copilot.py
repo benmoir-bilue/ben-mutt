@@ -448,6 +448,96 @@ class _Host(App):
 
 
 @pytest.mark.asyncio
+async def test_agent_run_tucks_mutt_away_then_restores(monkeypatch):
+    """:tips/:sort/:zero and :mutt share the right column — never stack them.
+    Starting an agent hides Mutt; dismissing the agent brings him back."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.tui.widgets import AgentPanel, CopilotPanel
+    cfg = Config(); cfg.anthropic_api_key = "x"
+    app = BemApp(gmail=_FakeGmail(), config=cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        cop, ag = scr.query_one(CopilotPanel), scr.query_one(AgentPanel)
+        scr._toggle_copilot()
+        await pilot.pause()
+        assert cop.display and scr._copilot_on
+        # Start an agent run without touching the API.
+        monkeypatch.setattr(scr, "_run_agent_worker", lambda *a, **k: None)
+        scr._start_agent("Learning folders", "goal")
+        await pilot.pause()
+        # Agent shown, Mutt tucked away — never both at once.
+        assert ag.display and not cop.display and scr._copilot_hidden_for_agent
+        # Dismissing the agent restores Mutt.
+        scr.on_agent_panel_dismissed(AgentPanel.Dismissed())
+        await pilot.pause()
+        assert not ag.display and cop.display and not scr._copilot_hidden_for_agent
+
+
+@pytest.mark.asyncio
+async def test_focus_command_sets_shows_and_clears(tmp_path, monkeypatch):
+    from bem.ai import memory
+    monkeypatch.setattr(memory, "FOCUS_FILE", tmp_path / "focus.md")
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._set_focus("closing Globex, Acme onboarding")
+        assert memory.load_focus().text == "closing Globex, Acme onboarding"
+        scr._set_focus("")            # show — must not change or error
+        assert memory.load_focus().text == "closing Globex, Acme onboarding"
+        scr._set_focus("clear")
+        assert memory.load_focus() is None
+
+
+@pytest.mark.asyncio
+async def test_esc_closes_mutt_from_the_inbox():
+    """Mutt promises 'Esc to leave' — pressing Esc with focus on the inbox
+    (not the chat line) closes the panel."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.tui.widgets import CopilotPanel, MessageList
+    cfg = Config(); cfg.anthropic_api_key = "x"
+    app = BemApp(gmail=_FakeGmail(), config=cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._toggle_copilot()
+        await pilot.pause()
+        cop = scr.query_one(CopilotPanel)
+        assert cop.display and scr._copilot_on
+        scr.query_one(MessageList).focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not cop.display and not scr._copilot_on
+
+
+@pytest.mark.asyncio
+async def test_mutt_refuses_to_open_over_a_live_agent(monkeypatch):
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.tui.widgets import AgentPanel, CopilotPanel
+    cfg = Config(); cfg.anthropic_api_key = "x"
+    app = BemApp(gmail=_FakeGmail(), config=cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        cop, ag = scr.query_one(CopilotPanel), scr.query_one(AgentPanel)
+        monkeypatch.setattr(scr, "_run_agent_worker", lambda *a, **k: None)
+        scr._start_agent("Sorting inbox", "goal")   # Mutt was off
+        await pilot.pause()
+        assert ag.display and not cop.display
+        # :mutt while the agent panel is up must not stack a second panel.
+        scr._toggle_copilot()
+        await pilot.pause()
+        assert not cop.display and not scr._copilot_on
+
+
+@pytest.mark.asyncio
 async def test_panel_mounts_and_posts():
     app = _Host()
     async with app.run_test() as pilot:
