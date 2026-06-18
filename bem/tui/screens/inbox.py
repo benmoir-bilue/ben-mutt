@@ -307,6 +307,7 @@ class InboxScreen(
         self._copilot_feed: list = []                 # ordered TriageNotes (the [n] refs)
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
+        self._present = True                            # is Ben at the keyboard? (presence)
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:

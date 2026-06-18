@@ -55,6 +55,11 @@ class CopilotPanel(Vertical):
         self._status = ""
         self._word_i = 0
         self._started = 0.0
+        # Heartbeat: proof Mutt is alive and watching, shown in the idle title.
+        self._present = True
+        self._new_count = 0
+        self._last_sniff: float | None = None
+        self._next_sniff_at: float | None = None
 
     def compose(self) -> ComposeResult:
         yield Label("🐕 Mutt — off", id="copilot-title")
@@ -73,6 +78,8 @@ class CopilotPanel(Vertical):
     def start(self) -> None:
         self.state = "idle"
         self.display = True
+        self._new_count = 0
+        self._last_sniff = time.monotonic()
         self._feed.write(Text("🐕 Mutt is on watch. I'll bark when something matters.",
                               style="bold $accent"))
         self._feed.write(Text(
@@ -103,18 +110,48 @@ class CopilotPanel(Vertical):
             self.state = "idle"
         self._set_title()
 
+    def mark_sniff(self, new_count: int, present: bool, next_in: float) -> None:
+        """Record a completed poll so the heartbeat shows fresh activity: bumps
+        the 'new' tally, resets the 'sniffed Ns ago' clock, and the countdown to
+        the next sniff."""
+        self._new_count += max(0, new_count)
+        self._present = present
+        now = time.monotonic()
+        self._last_sniff = now
+        self._next_sniff_at = now + max(0.0, next_in)
+
+    def set_present(self, present: bool) -> None:
+        self._present = present
+
     def _tick(self) -> None:
-        if self.state != "thinking":
-            return
-        self._frame = (self._frame + 1) % len(SPINNER)
-        elapsed = int(time.monotonic() - self._started)
-        word = copilot.status_word(self._word_i)
-        self.query_one("#copilot-title", Label).update(
-            f"🐕 {SPINNER[self._frame]} {word}… ({elapsed}s)"
-        )
+        if self.state == "thinking":
+            self._frame = (self._frame + 1) % len(SPINNER)
+            elapsed = int(time.monotonic() - self._started)
+            word = copilot.status_word(self._word_i)
+            self.query_one("#copilot-title", Label).update(
+                f"🐕 {SPINNER[self._frame]} {word}… ({elapsed}s)"
+            )
+        elif self.state == "idle":
+            # Live heartbeat — countdown ticks so it never looks frozen.
+            self.query_one("#copilot-title", Label).update(self._render_heartbeat())
+
+    def _render_heartbeat(self) -> str:
+        bits = ["👀 watching" if self._present else "💤 away"]
+        if self._new_count:
+            bits.append(f"{self._new_count} new")
+        if self._last_sniff is not None:
+            bits.append(f"sniffed {int(time.monotonic() - self._last_sniff)}s ago")
+        if not self._present:
+            bits.append("I'll brief you when you're back")
+        elif self._next_sniff_at is not None:
+            bits.append(f"next {max(0, int(self._next_sniff_at - time.monotonic()))}s")
+        return "🐕 " + " · ".join(bits)
 
     def _set_title(self, suffix: str = "watching") -> None:
-        self.query_one("#copilot-title", Label).update(f"🐕 Mutt — {suffix}")
+        if self.state == "idle":
+            self.query_one("#copilot-title", Label).update(self._render_heartbeat())
+        else:
+            self.query_one("#copilot-title", Label).update(f"🐕 Mutt — {suffix}")
 
     # ── Feed ────────────────────────────────────────────────────────────────
 

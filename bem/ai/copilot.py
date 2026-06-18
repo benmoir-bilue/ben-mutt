@@ -89,9 +89,13 @@ def is_active_hours(now: Optional[datetime] = None) -> bool:
     return 7 <= local.hour < 19
 
 
-def poll_interval(now: Optional[datetime] = None) -> float:
-    """Seconds between polls: brisk in the day, lazy at night."""
-    return 60.0 if is_active_hours(now) else 600.0
+def poll_interval(now: Optional[datetime] = None, present: bool = True) -> float:
+    """Seconds between polls: brisk in the day, lazy at night — and never faster
+    than every 5 minutes when Ben is away from the keyboard."""
+    base = 60.0 if is_active_hours(now) else 600.0
+    if not present:
+        return max(base, 300.0)
+    return base
 
 
 def status_word(i: int) -> str:

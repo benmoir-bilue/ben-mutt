@@ -97,11 +97,20 @@ class MessageList(DataTable):
 
     COLUMN_KEYS = ("u", "from", "subject", "n", "date")
 
-    def populate(self, threads: list[Thread], cursor_row: int = 0) -> None:
+    def populate(
+        self, threads: list[Thread], cursor_row: int = 0,
+        cursor_key: Optional[str] = None,
+    ) -> None:
         self._threads = threads
         self._thread_map = {t.id: t for t in threads}
         self._expanded &= set(self._thread_map)
-        self._rebuild(cursor_row=cursor_row)
+        # cursor_key (a thread id) keeps the selection on the same email across a
+        # background refresh even when rows shift; falls back to cursor_row.
+        self._rebuild(cursor_row=cursor_row, cursor_key=cursor_key)
+
+    def selected_key(self) -> Optional[str]:
+        """The id of the currently selected thread row, or None."""
+        return self._cursor_key() or None
 
     def apply_triage(self, triage: dict[str, TriageLevel]) -> None:
         """Colour rows based on triage level map {thread_id: TriageLevel}."""

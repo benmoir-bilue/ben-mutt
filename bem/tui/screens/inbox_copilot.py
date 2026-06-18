@@ -76,7 +76,12 @@ class CopilotMixin:
         # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
         # then give an initial digest of the top few threads already sitting here.
         self._seen_thread_ids = {t.id for t in self._threads}
+        from bem.ai import presence
+        self._present = presence.is_present()
         panel.start()
+        # Show the heartbeat immediately (countdown to first sniff) rather than
+        # leaving a static title until the first poll lands.
+        panel.mark_sniff(0, self._present, copilot_mod.poll_interval(present=self._present))
         self.notify("Mutt is on watch 🐕")
         self._copilot_triage_batch(self._threads[:5])
         self._schedule_copilot_poll()
@@ -85,7 +90,7 @@ class CopilotMixin:
         if not self._copilot_on:
             return
         self._copilot_timer = self.set_timer(
-            copilot_mod.poll_interval(), self._copilot_poll
+            copilot_mod.poll_interval(present=self._present), self._copilot_poll
         )
 
     def _copilot_poll(self) -> None:
@@ -97,8 +102,10 @@ class CopilotMixin:
     @work(thread=True, exclusive=True, group="copilot-poll", exit_on_error=False)
     def _copilot_fetch(self) -> None:
         """Quietly list the inbox to spot new mail — independent of which folder
-        the user is currently viewing."""
+        the user is currently viewing. Also samples presence (off the UI thread)."""
         worker = get_current_worker()
+        from bem.ai import presence
+        present = presence.is_present()
         try:
             threads, token = self.gmail.list_threads(
                 label_id="INBOX", max_results=self.config.threads_per_page,
@@ -107,20 +114,28 @@ class CopilotMixin:
             log.debug("copilot fetch failed: %s", e)
             return
         if not worker.is_cancelled:
-            self.app.call_from_thread(self._on_copilot_fetch, threads, token)
+            self.app.call_from_thread(self._on_copilot_fetch, threads, token, present)
 
-    def _on_copilot_fetch(self, threads: list[Thread], token: Optional[str]) -> None:
+    def _on_copilot_fetch(
+        self, threads: list[Thread], token: Optional[str], present: bool = True,
+    ) -> None:
+        self._present = present
         new = [t for t in threads if t.id not in self._seen_thread_ids]
         self._seen_thread_ids |= {t.id for t in threads}
+        # Every sniff updates the heartbeat — even a quiet one — so Mutt visibly
+        # stays alive. next_in mirrors how the next poll will be scheduled.
+        next_in = copilot_mod.poll_interval(present=present)
+        self.query_one(CopilotPanel).mark_sniff(len(new), present, next_in)
         if not new:
             return
-        # Refresh the visible list only when the user is on the inbox AND idle,
-        # so new mail appears without yanking the view mid-navigation.
-        if self._viewing_inbox() and self._is_idle():
+        # Repaint the inbox in place, keeping the cursor on the same email by id
+        # so new mail lands without yanking the view mid-navigation.
+        if self._viewing_inbox():
+            ml = self.query_one(MessageList)
+            keep = ml.selected_key()
             self._threads = threads
             self._next_page_token = token
-            cursor = self.query_one(MessageList).cursor_row or 0
-            self.query_one(MessageList).populate(threads, cursor_row=cursor)
+            ml.populate(threads, cursor_key=keep)
             self._scan_invites([t.id for t in threads])
         self._copilot_triage_batch(new[:5])
 

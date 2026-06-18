@@ -537,6 +537,51 @@ async def test_mutt_refuses_to_open_over_a_live_agent(monkeypatch):
         assert not cop.display and not scr._copilot_on
 
 
+def test_heartbeat_renders_liveness():
+    """The idle title is a live heartbeat — proof Mutt is watching."""
+    from bem.tui.widgets.copilot_panel import CopilotPanel
+    p = CopilotPanel()
+    p.mark_sniff(2, present=True, next_in=60)
+    hb = p._render_heartbeat()
+    assert "👀 watching" in hb and "2 new" in hb and "next" in hb and "sniffed" in hb
+    p.set_present(False)
+    away = p._render_heartbeat()
+    assert "💤 away" in away and "brief you" in away
+
+
+@pytest.mark.asyncio
+async def test_background_refresh_keeps_selection(make_message):
+    """New mail repaints the inbox in place without moving the cursor off the
+    email Ben is on — the fix for 'the inbox isn't updating' without yanking."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import MessageList
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._scan_invites = lambda *a, **k: None
+        scr._copilot_triage_batch = lambda *a, **k: None
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        t1 = Thread(id="t1", snippet="a", messages=[make_message(id="m1", thread_id="t1", subject="One")])
+        t2 = Thread(id="t2", snippet="b", messages=[make_message(id="m2", thread_id="t2", subject="Two")])
+        ml = scr.query_one(MessageList)
+        ml.populate([t1, t2])
+        scr._threads = [t1, t2]
+        scr._seen_thread_ids = {"t1", "t2"}
+        ml.move_cursor(row=ml.get_row_index("t2"))
+        await pilot.pause()
+        assert ml.selected_key() == "t2"
+        # New mail lands at the top.
+        t3 = Thread(id="t3", snippet="c", messages=[make_message(id="m3", thread_id="t3", subject="Three")])
+        scr._on_copilot_fetch([t3, t1, t2], None, present=True)
+        await pilot.pause()
+        assert ml.get_row_index("t3") >= 0          # refreshed: new thread is shown
+        assert ml.selected_key() == "t2"            # cursor stayed put
+
+
 @pytest.mark.asyncio
 async def test_panel_mounts_and_posts():
     app = _Host()
