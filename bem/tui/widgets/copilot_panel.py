@@ -17,27 +17,27 @@ from textual.widgets import Input, Label, RichLog
 
 from bem.ai import copilot
 
-# Mutt patrols a scent trail in the title row. 🐕 faces LEFT, so he enters from
-# the right and pads leftward: a 💨 sniff cloud in front of his nose, fresh 🐾
-# prints behind. At the left edge he loops and re-enters from the right.
-WALK_SLOTS = 8
+# A mood emoji sits next to "Mutt" to show what he's up to. No animation — it
+# just changes with his state (and drifts through the idle moods so he has a bit
+# of personality when the inbox is quiet).
+SNIFF_MOODS = ["🐽", "👃", "🔍", "🕵️", "🤔"]            # actively working a pass
+AWAY_MOODS = ["😴", "💤"]                              # you're gone — napping on the job
+IDLE_MOODS = [
+    "👀",   # watching the inbox
+    "🦴",   # gnawing a bone (all quiet)
+    "🥱",   # bored
+    "🐿️",   # distracted by a squirrel
+    "🎾",   # wants to play
+    "🧦",   # nicked a sock
+    "👅",   # panting happily
+    "🍖",   # snack break
+    "🐾",   # pacing
+    "💭",   # daydreaming
+]
+NEW_MAIL_MOOD = "👂"   # ears perked — fresh mail just landed
 
-
-def _walk_strip(step: int, slots: int = WALK_SLOTS) -> str:
-    """One frame of the walking dog as a space-joined trail of `slots` cells."""
-    cycle = slots + 2                  # a short off-screen gap before re-entering
-    pos = (slots - 1) - (step % cycle)  # start at the right edge, move left
-    cells = ["·"] * slots
-
-    def put(i: int, glyph: str) -> None:
-        if 0 <= i < slots:
-            cells[i] = glyph
-
-    put(pos + 2, "🐾")   # prints behind (to his right — where he came from)
-    put(pos + 1, "🐾")
-    put(pos, "🐕")        # the dog, facing left
-    put(pos - 1, "💨")    # sniff cloud in front (to his left — where he's headed)
-    return " ".join(cells)
+# Rotate idle moods every this-many ticks (ticks are 0.25s → ~10s per mood).
+IDLE_MOOD_TICKS = 40
 
 
 _URGENCY_STYLE = {"high": "bold red", "normal": "", "low": "dim"}
@@ -151,25 +151,32 @@ class CopilotPanel(Vertical):
         self.query_one("#copilot-title", Label).update(self._render_title())
 
     def _render_title(self) -> str:
-        """The walking dog + a state-dependent caption. The trail animates in
-        both states so the panel never looks frozen; the caption changes."""
-        strip = _walk_strip(self._frame)
+        """🐕 Mutt {mood}  {caption} — a mood emoji for what he's doing, plus a
+        live caption (countdown ticks so it never looks frozen)."""
         if self.state == "thinking":
             word = copilot.status_word(self._word_i)
             elapsed = int(time.monotonic() - self._started)
             caption = f"{word} the inbox… ({elapsed}s)"
         else:
             caption = self._heartbeat_suffix()
-        return f"{strip}  {caption}"
+        return f"🐕 Mutt {self._mood()}  {caption}"
+
+    def _mood(self) -> str:
+        """The emoji that says what Mutt's up to right now."""
+        if self.state == "thinking":
+            return SNIFF_MOODS[self._word_i % len(SNIFF_MOODS)]
+        if not self._present:
+            return AWAY_MOODS[(self._frame // 8) % len(AWAY_MOODS)]
+        return IDLE_MOODS[(self._frame // IDLE_MOOD_TICKS) % len(IDLE_MOODS)]
 
     def _heartbeat_suffix(self) -> str:
-        bits = ["watching" if self._present else "💤 away"]
+        bits = ["watching" if self._present else "away"]
         if self._new_count:
             bits.append(f"{self._new_count} new")
         if self._last_sniff is not None:
             bits.append(f"sniffed {int(time.monotonic() - self._last_sniff)}s ago")
         if not self._present:
-            bits.append("I'll brief you when you're back")
+            bits.append("back soon? I'll brief you")
         elif self._next_sniff_at is not None:
             bits.append(f"next {max(0, int(self._next_sniff_at - time.monotonic()))}s")
         return " · ".join(bits)

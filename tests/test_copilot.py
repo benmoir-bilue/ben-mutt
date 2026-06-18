@@ -549,18 +549,29 @@ def test_heartbeat_renders_liveness():
     assert "away" in away and "brief you" in away
 
 
-def test_walking_dog_faces_left_cloud_front_prints_behind():
-    """🐕 enters from the right, 💨 cloud in front (left), 🐾 prints behind (right)."""
-    from bem.tui.widgets.copilot_panel import _walk_strip, WALK_SLOTS
-    # Step 0: dog enters at the right edge.
-    assert _walk_strip(0).split(" ").index("🐕") == WALK_SLOTS - 1
-    # A few steps in, dog is mid-trail with cloud ahead and prints behind.
-    cells = _walk_strip(2).split(" ")
-    d = cells.index("🐕")
-    assert cells[d - 1] == "💨"          # cloud in front (to his left)
-    assert cells[d + 1] == "🐾"          # fresh print behind (to his right)
-    # He moves leftward as steps advance.
-    assert _walk_strip(3).split(" ").index("🐕") < _walk_strip(1).split(" ").index("🐕")
+def test_mood_emoji_reflects_state():
+    """A mood emoji next to Mutt shows what he's doing — sniffing while working,
+    asleep while away, a drifting idle mood while watching."""
+    from bem.tui.widgets.copilot_panel import (
+        CopilotPanel, SNIFF_MOODS, AWAY_MOODS, IDLE_MOODS, IDLE_MOOD_TICKS,
+    )
+    p = CopilotPanel()
+    p.state = "thinking"
+    assert p._mood() in SNIFF_MOODS
+    p.state = "idle"
+    p.set_present(False)
+    assert p._mood() in AWAY_MOODS
+    p.set_present(True)
+    assert p._mood() in IDLE_MOODS
+    # Idle mood drifts over time (no frozen face) but isn't a frantic animation.
+    p._frame = 0
+    first = p._mood()
+    p._frame = IDLE_MOOD_TICKS
+    assert p._mood() != first or len(IDLE_MOODS) == 1
+    # The rendered title carries the dog, a mood, and the live caption.
+    p.mark_sniff(2, present=True, next_in=60)
+    title = p._render_title()
+    assert title.startswith("🐕 Mutt ") and "watching" in title and "next" in title
 
 
 @pytest.mark.asyncio
