@@ -313,6 +313,7 @@ class InboxScreen(
         self._away_since: Optional[float] = None        # monotonic when he stepped away
         self._away_new: list = []                       # (sender, subject) seen while away
         self._last_brief = ""                           # last while-you-were-out briefing
+        self._tidy_proposed: list[str] = []             # thread ids :tidy offered to archive
 
         self._pending_triage: dict[str, TriageLevel] = {}
         if config.anthropic_api_key:
@@ -854,6 +855,12 @@ class InboxScreen(
             return
         if cmd in ("brief", "briefing"):
             self._show_brief()
+            return
+        if cmd in ("tidy", "tidy!"):
+            self._tidy(execute=cmd.endswith("!"))
+            return
+        if cmd == "vip":
+            self._add_vip(arg)
             return
         if cmd in ("summarise", "summarize", "summary"):
             self._ai_command("summarise")

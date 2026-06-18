@@ -109,6 +109,24 @@ def load_vips() -> list[str]:
     return out
 
 
+def add_vip(matcher: str) -> bool:
+    """Append a VIP matcher to vips.md (deduped). Returns True if it was added."""
+    matcher = matcher.strip().lstrip("-*").strip()
+    if not matcher:
+        return False
+    if matcher.lower() in {v.lower() for v in load_vips()}:
+        return False
+    VIPS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = VIPS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    sep = "" if (not existing or existing.endswith("\n")) else "\n"
+    with open(VIPS_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{sep}- {matcher}\n")
+    return True
+
+
 def load_rules() -> str:
     """The standing filing/handling rules, or a placeholder when none exist."""
     try:

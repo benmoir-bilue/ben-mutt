@@ -260,6 +260,19 @@ Output ONLY JSON, no prose:
 Honour Ben's focus, VIPs and rules below.
 {memory}"""
 
+_TIDY_SYSTEM = """You are Mutt, tidying Ben's inbox toward zero. From these emails, \
+list ONLY the ids that are clearly disposable and safe to archive WITHOUT Ben reading \
+them — newsletters, automated notifications, receipts, marketing blasts.
+
+NEVER include: anything where a real person is waiting on Ben, anything matching his \
+focus or VIPs, calendar invites, or anything you're unsure about. When in doubt, leave \
+it out.
+
+Output ONLY a JSON array of ids, e.g. ["id1","id2"]. Empty array if nothing's safe.
+
+What Mutt knows:
+{memory}"""
+
 
 class CopilotBrain:
     def __init__(self, api_key: str, fast_model: str, smart_model: str) -> None:
@@ -414,6 +427,29 @@ class CopilotBrain:
                 if item and item.thread_id != hero.thread_id:
                     on_deck.append(item)
         return Ranking(hero=hero, on_deck=on_deck)
+
+    def tidy_targets(self, threads: list["Thread"], memory_ctx: str = "") -> list[str]:
+        """Thread ids that are disposable noise, safe to archive unread. Empty on
+        any failure — tidy must never guess threads into the bin."""
+        candidates = _curate_candidates(threads)
+        if not candidates:
+            return []
+        lines = "\n".join(
+            f"{c.thread_id} | {c.sender} | {c.subject} | {c.snippet}" for c in candidates
+        )
+        try:
+            resp = self._client.messages.create(
+                model=self._fast, max_tokens=800,
+                system=_TIDY_SYSTEM.format(memory=memory_ctx or "(nothing yet)"),
+                messages=[{"role": "user", "content": lines}],
+            )
+            data = _extract_json(resp.content[0].text if resp.content else "")
+        except Exception:
+            data = None
+        valid = {c.thread_id for c in candidates}
+        if not isinstance(data, list):
+            return []
+        return [str(x) for x in data if str(x) in valid]
 
     def chat(
         self,

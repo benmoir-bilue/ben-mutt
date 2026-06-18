@@ -68,6 +68,19 @@ class TestVips:
         assert memory.load_vips() == []
 
 
+class TestAddVip:
+    def test_adds_and_dedupes(self, mem_files):
+        assert memory.add_vip("priya@northwind.example") is True
+        assert memory.add_vip("priya@northwind.example") is False   # dedupe
+        assert memory.add_vip("- Marie") is True                    # strips bullet
+        vips = memory.load_vips()
+        assert "priya@northwind.example" in vips and "Marie" in vips
+
+    def test_blank_is_noop(self, mem_files):
+        assert memory.add_vip("   ") is False
+        assert memory.load_vips() == []
+
+
 class TestMemoryContext:
     def test_includes_focus_vips_rules(self, mem_files):
         memory.save_focus("ship the Q3 release")

@@ -299,6 +299,94 @@ class CopilotMixin:
         else:
             panel.post_mutt("All quiet — nothing urgent in the inbox right now. 🦴")
 
+    # ── Tidy toward inbox-zero (markdown-native, undo-able) ───────────────────
+
+    def _tidy(self, execute: bool = False) -> None:
+        """':tidy' proposes disposable noise to clear; ':tidy!' archives it."""
+        if not self._copilot_on:
+            self.notify("Mutt's off — :mutt to wake him.", severity="warning")
+            return
+        if not self._viewing_inbox():
+            self.notify("Open the inbox first, then :tidy.", severity="warning")
+            return
+        if execute:
+            self._copilot_tidy_execute()
+        else:
+            self._copilot_tidy_propose()
+
+    @work(thread=True, exclusive=True, group="copilot-tidy", exit_on_error=False)
+    def _copilot_tidy_propose(self) -> None:
+        worker = get_current_worker()
+        from bem.ai import memory
+        self._copilot_word += 1
+        self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
+        try:
+            ids = self._copilot.tidy_targets(self._threads, memory.memory_context())
+        except Exception as e:
+            log.debug("tidy propose failed: %s", e)
+            ids = []
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._on_tidy_proposed, ids)
+        self.app.call_from_thread(self._copilot_end_thinking)
+
+    def _on_tidy_proposed(self, ids: list[str]) -> None:
+        by_id = {t.id: t for t in self._threads}
+        items = [by_id[i] for i in ids if i in by_id]
+        self._tidy_proposed = [t.id for t in items]
+        panel = self.query_one(CopilotPanel)
+        if not items:
+            panel.post_mutt("Nothing obvious to tidy — inbox's already tight. 🦴")
+            return
+        lines = [f"I can clear {len(items)} bit(s) of noise:"]
+        lines += [f" • {t.sender} — {t.subject}" for t in items[:8]]
+        if len(items) > 8:
+            lines.append(f" • …and {len(items) - 8} more")
+        lines.append("Run :tidy! to archive them (undo-able).")
+        panel.post_mutt("\n".join(lines))
+
+    @work(thread=True, group="copilot-tidy-exec", exit_on_error=False)
+    def _copilot_tidy_execute(self) -> None:
+        ids = list(self._tidy_proposed)
+        if not ids:
+            self.app.call_from_thread(
+                self.notify, "Nothing proposed — run :tidy first.", severity="warning"
+            )
+            return
+        done = 0
+        for tid in ids:
+            try:
+                self.gmail.modify_thread(tid, remove_labels=["INBOX"])
+                done += 1
+                self.app.call_from_thread(
+                    self._copilot_undo.append, {"op": "archive", "thread_id": tid}
+                )
+            except Exception as e:
+                log.debug("tidy archive failed for %s: %s", tid, e)
+        self._tidy_proposed = []
+        self.app.call_from_thread(self._after_tidy, done)
+
+    def _after_tidy(self, done: int) -> None:
+        self.notify(f"Tidied {done} away 🐕 — say 'undo' to restore the last.")
+        if self._viewing_inbox():
+            self.load_threads(label_id="INBOX")
+
+    # ── Learning (markdown): VIP senders ──────────────────────────────────────
+
+    def _add_vip(self, arg: str) -> None:
+        """':vip <email/name>' adds a VIP; ':vip' lists them."""
+        from bem.ai import memory
+        m = arg.strip()
+        if not m:
+            vips = memory.load_vips()
+            self.notify("VIPs: " + (", ".join(vips) if vips else "(none) — ':vip <who>' to add"))
+            return
+        if memory.add_vip(m):
+            self.notify(f"VIP added: {m} 🐕")
+            if self._copilot_on and self._viewing_inbox():
+                self._copilot_curate(self._threads)
+        else:
+            self.notify(f"{m} is already a VIP.")
+
     def _copilot_begin_thinking(self, word_i: int) -> None:
         self.query_one(CopilotPanel).begin_thinking(word_i)
 

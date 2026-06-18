@@ -654,6 +654,53 @@ async def test_sniff_rerank_on_inbox_change_not_just_new_mail(make_message):
 
 
 @pytest.mark.asyncio
+async def test_tidy_proposes_then_archives(make_message):
+    """:tidy proposes disposable noise; :tidy! archives it (undo-able)."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import CopilotPanel
+    g = _FakeGmail()
+    app = BemApp(gmail=g, config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        scr.query_one(CopilotPanel).start()
+        await pilot.pause()
+        news = Thread(id="news", snippet="x",
+                      messages=[make_message(id="mn", thread_id="news", subject="Newsletter")])
+        scr._threads = [news]
+        scr._on_tidy_proposed(["news"])           # the worker's result
+        assert scr._tidy_proposed == ["news"]
+        scr._copilot_tidy_execute()               # :tidy!
+        await pilot.pause()
+        assert ("news", None) in g.modified       # archived (INBOX removed)
+        assert scr._tidy_proposed == []
+        assert scr._copilot_undo[-1] == {"op": "archive", "thread_id": "news"}
+
+
+@pytest.mark.asyncio
+async def test_vip_command_adds_and_recurates(tmp_path, monkeypatch):
+    from bem.ai import memory
+    monkeypatch.setattr(memory, "VIPS_FILE", tmp_path / "vips.md")
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        recurated = []
+        scr._copilot_curate = lambda threads: recurated.append(threads)
+        scr._add_vip("ceo@board.example")
+        assert "ceo@board.example" in memory.load_vips()
+        assert recurated, "adding a VIP should re-rank while watching the inbox"
+
+
+@pytest.mark.asyncio
 async def test_away_then_back_briefs_what_changed(make_message):
     """Step away → Mutt goes quiet and collects; come back → 'while you were out'."""
     from bem.config import Config

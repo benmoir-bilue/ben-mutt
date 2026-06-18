@@ -131,6 +131,23 @@ class TestComposeHero:
 
 # ── end-to-end ───────────────────────────────────────────────────────────────
 
+class TestTidyTargets:
+    def test_returns_only_valid_ids(self, make_message):
+        now = datetime(2026, 6, 18, tzinfo=timezone.utc)
+        threads = [_thread(make_message, "news", now, subject="Newsletter"),
+                   _thread(make_message, "marie", now, subject="SOW question")]
+        b = _brain(_Client('["news", "ghost"]'))   # ghost isn't in the inbox
+        assert b.tidy_targets(threads) == ["news"]
+
+    def test_empty_on_failure(self, make_message):
+        now = datetime(2026, 6, 18, tzinfo=timezone.utc)
+        threads = [_thread(make_message, "a", now)]
+        assert _brain(client=None).tidy_targets(threads) == []   # client raises → []
+
+    def test_empty_inbox(self):
+        assert _brain().tidy_targets([]) == []
+
+
 class TestCurate:
     def test_empty_inbox(self):
         r = _brain().curate([])
