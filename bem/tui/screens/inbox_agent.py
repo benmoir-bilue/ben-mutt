@@ -56,6 +56,12 @@ class AgentMixin:
         if panel.is_busy:
             self.notify("Agent already running — Esc in the panel to cancel", severity="warning")
             return
+        # The agent panel and Mutt's copilot share the right column; showing
+        # both stacks two 42%-wide panels and crushes the list/preview. Tuck
+        # Mutt away for the duration of the run and restore him on dismiss.
+        copilot = self.query_one(CopilotPanel)
+        self._copilot_hidden_for_agent = bool(copilot.display)
+        copilot.display = False
         panel.begin(title)
         self._run_agent_worker(goal, panel)
 
@@ -107,8 +113,16 @@ class AgentMixin:
         self.app.workers.cancel_group(self, "agent")
         self._pending_replies = []
         self.query_one(AgentPanel).dismiss_panel()
+        self._restore_copilot_panel()
         self.query_one(MessageList).focus()
         event.stop()
+
+    def _restore_copilot_panel(self) -> None:
+        """Bring Mutt's panel back if an agent run tucked it away."""
+        if getattr(self, "_copilot_hidden_for_agent", False):
+            self._copilot_hidden_for_agent = False
+            if getattr(self, "_copilot_on", False):
+                self.query_one(CopilotPanel).display = True
 
     @work(thread=True, group="agent-apply", exit_on_error=False)
     def _apply_plan_worker(self, plan: list[PlanAction], panel: AgentPanel) -> None:
