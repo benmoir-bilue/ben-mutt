@@ -307,6 +307,8 @@ class InboxScreen(
         self._copilot_feed: list = []                 # ranked items, the [n] refs in chat
         self._copilot_ranking = None                   # latest Curator Ranking
         self._inbox_sig = None                          # inbox fingerprint, to re-rank on change
+        self._inbox_zero = False                        # at zero → Mutt guards + plans to stay
+        self._last_zero_plan: list[str] = []            # cached "stay at zero" plan
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)
@@ -404,6 +406,8 @@ class InboxScreen(
             msg_list.populate(threads, cursor_row=cursor_row)
             if self.query_one(AgentPanel).state == "idle":
                 msg_list.focus()  # don't steal focus from an active agent panel
+            if not threads and self._viewing_inbox():
+                self.query_one(MessagePreview).show_inbox_zero()  # empty inbox → the dog
             self._update_status()
             log.debug("_on_threads_loaded: populate complete")
         except Exception as e:
@@ -701,7 +705,9 @@ class InboxScreen(
         thread = self._current_thread
         if not thread:
             return
-        self._mutate_thread(thread.id, "trash")
+        # Clear unread on the way out — like pressing `u` first — so a deleted
+        # thread never lingers in the unread counts (Gmail keeps UNREAD on trash).
+        self._mutate_thread(thread.id, "trash", also_mark_read=thread.is_unread)
 
     def action_toggle_unread(self) -> None:
         thread = self._current_thread
@@ -737,7 +743,11 @@ class InboxScreen(
 
     def action_command_mode(self, prefill: str = "") -> None:
         self.query_one(StatusBar).display = False
-        self.query_one(CommandBar).show(prefill)
+        bar = self.query_one(CommandBar)
+        # Folder names for Tab completion of :move / :folder. _match_label resolves
+        # by raw label name, so complete against that; dedup and sort for stable cycling.
+        bar.set_completions(sorted({l.name for l in self._labels}))
+        bar.show(prefill)
 
     def action_search_mode(self) -> None:
         self.action_command_mode("search ")
@@ -822,6 +832,9 @@ class InboxScreen(
             return
         if cmd == "search":
             self._do_search(arg)
+            return
+        if cmd == "theme":
+            self._set_theme(arg)
             return
         if cmd in ("folder", "cd", "go"):
             self.notify(self._drive_change_folder(arg))
@@ -916,6 +929,21 @@ class InboxScreen(
         return tips, True
 
 
+
+    def _set_theme(self, name: str) -> None:
+        """`:theme dark|light|green` — switch the look live and remember it."""
+        from bem.tui.app import THEME_CHOICES, resolve_theme
+        key = (name or "").strip().lower()
+        if key not in THEME_CHOICES:
+            self.notify(f"Usage: theme <{' | '.join(THEME_CHOICES)}>", severity="warning")
+            return
+        self.app.theme = resolve_theme(key)
+        self.config.theme = key
+        try:
+            self.config.save()
+        except Exception as e:
+            log.debug("theme save failed: %s", e)
+        self.notify(f"Theme: {key}")
 
     def _do_search(self, query: str) -> None:
         if not query:

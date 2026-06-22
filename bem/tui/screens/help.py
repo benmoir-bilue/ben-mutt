@@ -13,6 +13,7 @@ BINDINGS_TABLE = [
     ("gg",          "First thread",                  "Index"),
     ("G",           "Last thread",                   "Index"),
     ("v",           "Expand / collapse thread",      "Index"),
+    ("→ / ←",       "Open / close thread",           "Index"),
     ("V",           "Expand / collapse all threads", "Index"),
     ("P",           "Jump to parent message",        "Index"),
     ("Enter",       "Open thread + focus preview",   "Index"),
@@ -61,8 +62,10 @@ BINDINGS_TABLE = [
     (":cal-clean",   "Count calendar emails safe to delete", "Calendar"),
     (":cal-clean!",  "Trash handled invites (✓ ~ ⊘ ✗)", "Calendar"),
     (":move <label>", "Move thread (creates label)", "General"),
+    ("Tab",          "Autocomplete folder name (:move / :folder)", "General"),
     (":folder <name>", "Switch to a folder (Mutt can too)", "General"),
     (":search <q>", "Search Gmail",                  "General"),
+    (":theme <name>", "dark | light | green (CRT)",  "General"),
     ("?",           "This help",                     "General"),
 ]
 
