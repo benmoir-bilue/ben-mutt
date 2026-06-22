@@ -131,6 +131,20 @@ async def test_enter_opens_selected_link(make_message, make_thread, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_show_inbox_zero_renders_the_dachshund():
+    app = PreviewApp()
+    async with app.run_test() as pilot:
+        preview = app.query_one(MessagePreview)
+        preview.show_inbox_zero()
+        await pilot.pause()
+        text = "\n".join(strip.text for strip in preview.lines)
+        assert "inbox zero" in text
+        assert "good human" in text
+        assert "@" in text            # the dog silhouette is drawn with dense glyphs
+        assert preview._links == []   # the art has no navigable links
+
+
+@pytest.mark.asyncio
 async def test_arrows_scroll_when_no_links(make_message, make_thread):
     body = "\n".join(f"line {i}" for i in range(200))  # no URLs, tall body
     msg = make_message(body_plain=body, body_html="")

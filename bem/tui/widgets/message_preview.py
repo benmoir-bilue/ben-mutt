@@ -24,6 +24,30 @@ if TYPE_CHECKING:
     from bem.calendar import CalendarInvite
 
 
+# Shown in the preview pane when the inbox hits zero — a dachshund, since Mutt
+# (the copilot) is a dog and inbox-zero is his favourite state. Rendered from a
+# photo with a brightness ramp; dense chars are the dog, spaces the background.
+_INBOX_ZERO_ART = r"""
+                                      =*%%@@@%+
+                                     =@@@@@@@@@@#+=
+                                     %@@@@@@@%%@@@@@#
+                                    *@@@@@%@@%%%%%*=
+                                   =%@@@@@@@#
+                                  +%%@@@@@@@
+         -======+++++*******##%%##%@@@@@@@@@
+   -+*%%@@@@@@@@@@@@@@@@@@@@@@@@%%%@@@@@@@@%
+  =+##%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%
+  -#@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@#
+   %@%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@#
+#@@@@@@@@@#=    ===+*%%@@@@@@@@@@@@@@@@@@=
+@@@@*+++=                  +#@@@@@@@@#=
+@@@=                            +@@@#
+@@@%=                            =@@@#*
+
+           inbox zero — all caught up.  good human.  ♥
+"""
+
+
 class MessagePreview(RichLog):
     DEFAULT_CSS = """
     MessagePreview {
@@ -127,6 +151,17 @@ class MessagePreview(RichLog):
         self._links = []
         self._sel = -1
         self.clear()
+
+    def show_inbox_zero(self) -> None:
+        """Fill the empty preview with a happy dachshund — inbox zero."""
+        self._thread = None
+        self._message = None
+        self._links = []
+        self._sel = -1
+        self.clear()
+        for line in _INBOX_ZERO_ART.splitlines():
+            self.write(f"[#cd9b5f]{_e(line)}[/]")
+        self.call_after_refresh(self.scroll_home, animate=False)
 
     # ── Link navigation ──────────────────────────────────────────────────────
 

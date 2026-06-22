@@ -35,6 +35,7 @@ IDLE_MOODS = [
     "💭",   # daydreaming
 ]
 NEW_MAIL_MOOD = "👂"   # ears perked — fresh mail just landed
+ZERO_MOODS = ["💕", "💗"]                              # inbox zero — content, in love
 
 # Rotate idle moods every this-many ticks (ticks are 0.25s → ~10s per mood).
 IDLE_MOOD_TICKS = 40
@@ -82,6 +83,7 @@ class CopilotPanel(Vertical):
         self._new_count = 0
         self._last_sniff: float | None = None
         self._next_sniff_at: float | None = None
+        self._inbox_zero = False   # all clear — Mutt switches to a content heart
 
     def compose(self) -> ComposeResult:
         yield Label("🐕 Mutt — off", id="copilot-title")
@@ -102,6 +104,7 @@ class CopilotPanel(Vertical):
         self.state = "idle"
         self.display = True
         self._new_count = 0
+        self._inbox_zero = False
         self._last_sniff = time.monotonic()
         self.query_one("#copilot-hero", Static).update(
             Text("finding your top priority… 🐽", style="dim")
@@ -149,6 +152,10 @@ class CopilotPanel(Vertical):
     def set_present(self, present: bool) -> None:
         self._present = present
 
+    def set_inbox_zero(self, value: bool) -> None:
+        """Flip Mutt into (or out of) the content inbox-zero heart + caption."""
+        self._inbox_zero = value
+
     def _tick(self) -> None:
         if self.state == "off":
             return
@@ -172,10 +179,15 @@ class CopilotPanel(Vertical):
             return SNIFF_MOODS[self._word_i % len(SNIFF_MOODS)]
         if not self._present:
             return AWAY_MOODS[(self._frame // 8) % len(AWAY_MOODS)]
+        if self._inbox_zero:
+            return ZERO_MOODS[(self._frame // IDLE_MOOD_TICKS) % len(ZERO_MOODS)]
         return IDLE_MOODS[(self._frame // IDLE_MOOD_TICKS) % len(IDLE_MOODS)]
 
     def _heartbeat_suffix(self) -> str:
-        bits = ["watching" if self._present else "away"]
+        if self._present and self._inbox_zero:
+            bits = ["inbox zero"]
+        else:
+            bits = ["watching" if self._present else "away"]
         if self._new_count:
             bits.append(f"{self._new_count} new")
         if self._last_sniff is not None:
@@ -213,6 +225,23 @@ class CopilotPanel(Vertical):
         """Update the pinned hero card (one hero + on-deck). Stays put above the
         chat feed instead of scrolling away."""
         self.query_one("#copilot-hero", Static).update(self._hero_renderable(ranking))
+
+    def show_inbox_zero(self, plan: list[str]) -> None:
+        """Replace the hero card with a calm inbox-zero card: a celebration plus
+        Mutt's short plan for keeping it at zero."""
+        self.query_one("#copilot-hero", Static).update(self._inbox_zero_renderable(plan))
+
+    @staticmethod
+    def _inbox_zero_renderable(plan: list[str]) -> Text:
+        t = Text()
+        t.append("💕 INBOX ZERO\n", style="bold cyan")
+        t.append("  All clear — nothing in the inbox.\n", style="")
+        if plan:
+            t.append("  keeping it here:\n", style="dim")
+            for step in plan[:3]:
+                t.append(f"   • {step}\n", style="dim")
+        t.rstrip()
+        return t
 
     @staticmethod
     def _hero_renderable(ranking) -> Text:

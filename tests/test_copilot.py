@@ -590,6 +590,93 @@ def test_mood_emoji_reflects_state():
     assert title.startswith("🐕 Mutt ") and "watching" in title and "next" in title
 
 
+def test_inbox_zero_mood_and_caption():
+    """At inbox zero Mutt wears a content heart and the caption reads 'inbox zero'."""
+    from bem.tui.widgets.copilot_panel import CopilotPanel, ZERO_MOODS, IDLE_MOODS
+    p = CopilotPanel()
+    p.state = "idle"
+    p.set_present(True)
+    p.set_inbox_zero(True)
+    assert p._mood() in ZERO_MOODS
+    p.mark_sniff(0, present=True, next_in=60)
+    assert "inbox zero" in p._render_title()
+    # Leaving zero drops back to the ordinary watching moods.
+    p.set_inbox_zero(False)
+    assert p._mood() in IDLE_MOODS
+    # Away always wins over the heart — a napping dog isn't loved-up.
+    p.set_inbox_zero(True)
+    p.set_present(False)
+    from bem.tui.widgets.copilot_panel import AWAY_MOODS
+    assert p._mood() in AWAY_MOODS
+
+
+def test_inbox_zero_card_renders_plan():
+    from bem.tui.widgets.copilot_panel import CopilotPanel
+    txt = CopilotPanel._inbox_zero_renderable(
+        ["skim as it lands", "file when done", "tidy weekly"]
+    ).plain
+    assert "INBOX ZERO" in txt and "All clear" in txt
+    assert "keeping it here" in txt and "file when done" in txt
+    # No plan yet → still a valid celebratory card.
+    assert "INBOX ZERO" in CopilotPanel._inbox_zero_renderable([]).plain
+
+
+def test_inbox_zero_plan_parses_and_degrades():
+    """inbox_zero_plan returns the model's steps, or [] when it can't parse."""
+    brain = copilot.CopilotBrain.__new__(copilot.CopilotBrain)
+    brain._fast = "claude-haiku-4-5"
+
+    class _Resp:
+        def __init__(self, text):
+            self.content = [type("C", (), {"text": text})()]
+
+    class _Client:
+        def __init__(self, text):
+            self.messages = type("M", (), {"create": lambda _self, **kw: _Resp(text)})()
+
+    brain._client = _Client('["skim daily", "file fast", "tidy weekly", "extra dropped"]')
+    assert brain.inbox_zero_plan() == ["skim daily", "file fast", "tidy weekly"]  # capped at 3
+
+    brain._client = _Client("no json to be found here")
+    assert brain.inbox_zero_plan() == []
+
+
+@pytest.mark.asyncio
+async def test_reaching_inbox_zero_flips_to_heart_and_back(make_message):
+    """When the inbox empties, Mutt switches to the inbox-zero card + heart; the
+    next mail to land flips him back and triggers a re-rank."""
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from bem.gmail.models import Thread
+    from bem.tui.widgets import CopilotPanel
+    app = BemApp(gmail=_FakeGmail(), config=Config())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._scan_invites = lambda *a, **k: None
+        curated = []
+        scr._copilot_curate = lambda threads: curated.append(threads)
+        scr._current_label_id, scr._current_query = "INBOX", ""
+        panel = scr.query_one(CopilotPanel)
+        # Pretend the inbox had one thread; the sniff now comes back empty.
+        scr._inbox_sig = frozenset({("t1", True, "m1")})
+        scr._seen_thread_ids = {"t1"}
+        scr._on_copilot_fetch([], None, present=True)
+        await pilot.pause()
+        assert scr._inbox_zero is True and panel._inbox_zero is True
+        assert "INBOX ZERO" in panel.query_one("#copilot-hero").render().plain
+        assert curated == []                         # nothing to rank at zero
+
+        # A fresh email lands — back to work.
+        t2 = Thread(id="t2", snippet="x",
+                    messages=[make_message(id="m2", thread_id="t2", subject="New one")])
+        scr._on_copilot_fetch([t2], None, present=True)
+        await pilot.pause()
+        assert scr._inbox_zero is False and panel._inbox_zero is False
+        assert curated == [[t2]]                      # the new mail got ranked
+
+
 @pytest.mark.asyncio
 async def test_background_refresh_keeps_selection(make_message):
     """New mail repaints the inbox in place without moving the cursor off the

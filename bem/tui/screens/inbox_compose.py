@@ -49,9 +49,11 @@ from bem.tui.screens._inbox_shared import _match_label, _describe_error
 
 class ComposeMixin:
     @work(thread=True, group="mutations", exit_on_error=False)
-    def _mutate_thread(self, thread_id: str, op: str) -> None:
+    def _mutate_thread(self, thread_id: str, op: str, also_mark_read: bool = False) -> None:
         worker = get_current_worker()
         try:
+            if also_mark_read:
+                self.gmail.mark_read(thread_id)  # delete should clear unread too
             getattr(self.gmail, op)(thread_id)
         except Exception as e:
             if not worker.is_cancelled:
@@ -101,7 +103,11 @@ class ComposeMixin:
                 self._load_full_thread(next_thread.id)
             else:
                 self._current_thread = None
-                self.query_one(MessagePreview).clear_preview()
+                preview = self.query_one(MessagePreview)
+                if self._viewing_inbox():
+                    preview.show_inbox_zero()   # cleared the inbox — show the dog
+                else:
+                    preview.clear_preview()
         else:
             self._apply_local_label_change(thread_id, op)
         label = {"archive": "Archived", "trash": "Deleted", "mark_read": "Marked read",

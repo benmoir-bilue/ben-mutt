@@ -260,6 +260,16 @@ Output ONLY JSON, no prose:
 Honour Ben's focus, VIPs and rules below.
 {memory}"""
 
+_INBOX_ZERO_SYSTEM = """You are Mutt, Ben's loyal inbox dog. Ben just reached inbox \
+zero. Suggest 2-3 short, concrete next steps to help him KEEP it at zero — habits or \
+quick checks, tailored to what you know about him below. Warm and brief.
+
+Output ONLY a JSON array of short strings (each <=10 words), e.g. ["...","...","..."]. \
+No prose, no keys.
+
+What Mutt knows:
+{memory}"""
+
 _TIDY_SYSTEM = """You are Mutt, tidying Ben's inbox toward zero. From these emails, \
 list ONLY the ids that are clearly disposable and safe to archive WITHOUT Ben reading \
 them — newsletters, automated notifications, receipts, marketing blasts.
@@ -306,6 +316,22 @@ class CopilotBrain:
         except Exception:
             raw = ""
         return _coerce_note(raw, thread)
+
+    def inbox_zero_plan(self, memory_ctx: str = "") -> list[str]:
+        """A short plan for staying at inbox zero, written once when Ben gets
+        there. Returns [] on failure so the caller keeps its static fallback."""
+        try:
+            resp = self._client.messages.create(
+                model=self._fast, max_tokens=300,
+                system=_INBOX_ZERO_SYSTEM.format(memory=memory_ctx or "(nothing yet)"),
+                messages=[{"role": "user", "content": "Give me 2-3 steps to stay at inbox zero."}],
+            )
+            data = _extract_json(resp.content[0].text if resp.content else "")
+        except Exception:
+            return []
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip()][:3]
+        return []
 
     def curate(
         self,

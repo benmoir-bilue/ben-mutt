@@ -46,6 +46,13 @@ from bem.tui.screens._inbox_shared import _match_label
 
 log = bemlog.get()
 
+# Shown the instant Ben hits inbox zero, before (and instead of) any AI plan.
+_DEFAULT_ZERO_PLAN = [
+    "skim new mail as it lands — don't let it pile",
+    "archive or file each one the moment it's done",
+    "say :tidy if newsletters start creeping back",
+]
+
 
 class CopilotMixin:
     def _toggle_copilot(self) -> None:
@@ -162,7 +169,57 @@ class CopilotMixin:
             self._next_page_token = token
             ml.populate(threads, cursor_key=keep)
             self._scan_invites([t.id for t in threads])
+
+        if not threads:
+            self._enter_inbox_zero()
+            return
+        if self._inbox_zero:
+            # Mail just landed on a clear inbox — Mutt perks up and thinks it over.
+            self._inbox_zero = False
+            self.query_one(CopilotPanel).set_inbox_zero(False)
+            if new:
+                self.query_one(CopilotPanel).post_note(
+                    "📨 something just landed — let me think how to handle it.", "dim"
+                )
         self._copilot_curate(threads)
+
+    def _enter_inbox_zero(self) -> None:
+        """Inbox hit zero: switch Mutt to the content heart, clear stale rankings,
+        celebrate once, and ask him for a short plan to keep it here."""
+        first = not self._inbox_zero
+        self._inbox_zero = True
+        self._copilot_ranking = None
+        self._copilot_feed = []
+        panel = self.query_one(CopilotPanel)
+        panel.set_inbox_zero(True)
+        panel.show_inbox_zero(self._last_zero_plan or _DEFAULT_ZERO_PLAN)
+        if self._viewing_inbox():
+            self.query_one(MessagePreview).show_inbox_zero()
+        if first:
+            panel.post_note(
+                "💕 Inbox zero — nice work. I'll keep watch and help you stay here.",
+                "bold cyan",
+            )
+            if self._copilot and self._ai:
+                self._copilot_plan_zero()
+
+    @work(thread=True, exclusive=True, group="copilot-zero", exit_on_error=False)
+    def _copilot_plan_zero(self) -> None:
+        """Worker: ask Mutt for a short 'stay at zero' plan, then pin it."""
+        worker = get_current_worker()
+        if not self._copilot or not self._copilot_on:
+            return
+        from bem.ai import memory
+        try:
+            plan = self._copilot.inbox_zero_plan(memory_ctx=memory.memory_context())
+        except Exception as e:
+            log.debug("inbox-zero plan failed: %s", e)
+            return
+        if plan and not worker.is_cancelled and self._inbox_zero:
+            self._last_zero_plan = plan
+            self.app.call_from_thread(
+                lambda: self.query_one(CopilotPanel).show_inbox_zero(plan)
+            )
 
     def _viewing_inbox(self) -> bool:
         return self._current_label_id == "INBOX" and not self._current_query
