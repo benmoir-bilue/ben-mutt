@@ -6,9 +6,9 @@ from bem.calendar.ics import parse_ics, CalendarInvite, Attendee
 from bem.gmail.models import Message, Attachment, _parse_date
 
 
-# A real Google Calendar invite (folded lines and all), trimmed of the VTIMEZONE
-# body which the parser ignores.
-MILAD_ICS = (
+# A representative Google Calendar invite (folded lines and all), trimmed of the
+# VTIMEZONE body which the parser ignores.
+SAMPLE_ICS = (
     "BEGIN:VCALENDAR\r\n"
     "PRODID:-//Google Inc//Google Calendar 70.9054//EN\r\n"
     "VERSION:2.0\r\n"
@@ -17,15 +17,15 @@ MILAD_ICS = (
     "DTSTART;TZID=Australia/Adelaide:20260623T143000\r\n"
     "DTEND;TZID=Australia/Adelaide:20260623T150000\r\n"
     "DTSTAMP:20260615T092610Z\r\n"
-    "ORGANIZER;CN=Milad Dakka:mailto:milad@colabyr.com\r\n"
-    "UID:6so66cj174sj2b9lc8qj6b9k75j38bb26csj0b9l6osj4or5ccq32dhn74@google.com\r\n"
+    "ORGANIZER;CN=Dana Lee:mailto:dana@example.com\r\n"
+    "UID:evt000000000000000000000001@google.com\r\n"
     "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE\r\n"
-    " ;CN=Milad Dakka;X-NUM-GUESTS=0:mailto:milad@colabyr.com\r\n"
+    " ;CN=Dana Lee;X-NUM-GUESTS=0:mailto:dana@example.com\r\n"
     "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=\r\n"
     " TRUE;CN=user@example.com;X-NUM-GUESTS=0:mailto:user@example.com\r\n"
-    "LOCATION:https://meet.google.com/ttc-zqib-frq\r\n"
+    "LOCATION:https://meet.google.com/abc-defg-hij\r\n"
     "STATUS:CONFIRMED\r\n"
-    "SUMMARY:Milad <> Ben\r\n"
+    "SUMMARY:Dana <> You\r\n"
     "END:VEVENT\r\n"
     "END:VCALENDAR\r\n"
 )
@@ -33,17 +33,17 @@ MILAD_ICS = (
 
 class TestParseIcs:
     def test_core_fields(self):
-        inv = parse_ics(MILAD_ICS)
+        inv = parse_ics(SAMPLE_ICS)
         assert inv is not None
-        assert inv.uid == "6so66cj174sj2b9lc8qj6b9k75j38bb26csj0b9l6osj4or5ccq32dhn74@google.com"
-        assert inv.summary == "Milad <> Ben"
+        assert inv.uid == "evt000000000000000000000001@google.com"
+        assert inv.summary == "Dana <> You"
         assert inv.method == "REQUEST"
         assert inv.status == "CONFIRMED"
-        assert inv.organizer == "milad@colabyr.com"
-        assert inv.location == "https://meet.google.com/ttc-zqib-frq"
+        assert inv.organizer == "dana@example.com"
+        assert inv.location == "https://meet.google.com/abc-defg-hij"
 
     def test_dtstart_timezone_aware(self):
-        inv = parse_ics(MILAD_ICS)
+        inv = parse_ics(SAMPLE_ICS)
         assert inv.dtstart is not None
         assert inv.dtstart.tzinfo is not None
         # 14:30 in Adelaide (+09:30) == 05:00 UTC
@@ -52,15 +52,15 @@ class TestParseIcs:
 
     def test_folded_attendee_lines_unfolded(self):
         # The second attendee's email is split across a folded line.
-        inv = parse_ics(MILAD_ICS)
+        inv = parse_ics(SAMPLE_ICS)
         emails = {a.email for a in inv.attendees}
         assert "user@example.com" in emails
-        assert "milad@colabyr.com" in emails
+        assert "dana@example.com" in emails
 
     def test_attendee_partstat_lookup(self):
-        inv = parse_ics(MILAD_ICS)
+        inv = parse_ics(SAMPLE_ICS)
         assert inv.attendee_partstat("user@example.com") == "NEEDS-ACTION"
-        assert inv.attendee_partstat("MILAD@colabyr.com") == "ACCEPTED"  # case-insensitive
+        assert inv.attendee_partstat("DANA@example.com") == "ACCEPTED"  # case-insensitive
         assert inv.attendee_partstat("nobody@example.com") is None
 
     def test_utc_and_date_only(self):
@@ -90,15 +90,15 @@ class TestParseIcs:
         # A Google "Cancelled event" .ics — METHOD:CANCEL is the reliable signal.
         ics = (
             "BEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\n"
-            "UID:6nc8tft0vrdceqvl0kr1cqeo47_R20260618@google.com\r\n"
-            "STATUS:CANCELLED\r\nSUMMARY:ELT Meeting\r\n"
+            "UID:evt000000000000000000000003_R20260618@google.com\r\n"
+            "STATUS:CANCELLED\r\nSUMMARY:Team Meeting\r\n"
             "DTSTART;TZID=Australia/Sydney:20260618T083000\r\n"
             "END:VEVENT\r\nEND:VCALENDAR\r\n"
         )
         inv = parse_ics(ics)
         assert inv.method == "CANCEL"
         assert inv.status == "CANCELLED"
-        assert inv.summary == "ELT Meeting"
+        assert inv.summary == "Team Meeting"
 
 
 class TestInviteDetection:
@@ -146,7 +146,7 @@ class TestResponseStatus:
     def test_accepted_attendee(self):
         event = {"attendees": [
             {"email": "user@example.com", "responseStatus": "accepted"},
-            {"email": "milad@colabyr.com", "responseStatus": "accepted"},
+            {"email": "dana@example.com", "responseStatus": "accepted"},
         ]}
         c = self._client(event)
         assert c.response_status("uid", "user@example.com") == "accepted"
@@ -218,7 +218,7 @@ class TestDispositionMark:
 
 
 class TestConflictFilter:
-    """The Priyabrata case: only 'Focus time' should survive as a conflict."""
+    """Only 'Focus time' should survive as a conflict."""
 
     def _events(self):
         return [
@@ -229,10 +229,10 @@ class TestConflictFilter:
              "start": {"dateTime": "2026-06-22T09:00:00+10:00"},
              "end": {"dateTime": "2026-06-22T12:00:00+10:00"},
              "status": "confirmed"},
-            {"summary": "Priyabrata Karmakar - placeholder",
+            {"summary": "Dana Lee - placeholder",
              "start": {"dateTime": "2026-06-22T10:00:00+10:00"},
              "end": {"dateTime": "2026-06-22T11:00:00+10:00"},
-             "iCalUID": "2502cljngc7ubso4kkj0ta2jih@google.com", "status": "confirmed"},
+             "iCalUID": "evt000000000000000000000002@google.com", "status": "confirmed"},
             {"summary": "Declined thing",
              "start": {"dateTime": "2026-06-22T10:15:00+10:00"},
              "end": {"dateTime": "2026-06-22T10:45:00+10:00"}, "status": "confirmed",
@@ -245,12 +245,12 @@ class TestConflictFilter:
     def test_only_busy_timed_non_self_survives(self):
         from bem.calendar.client import _filter_conflicts
         out = _filter_conflicts(self._events(),
-                                exclude_uid="2502cljngc7ubso4kkj0ta2jih@google.com")
+                                exclude_uid="evt000000000000000000000002@google.com")
         summaries = [c.summary for c in out]
         assert summaries == ["Focus time"]
 
     def test_conflict_carries_times(self):
         from bem.calendar.client import _filter_conflicts
         (c,) = _filter_conflicts(self._events(),
-                                 exclude_uid="2502cljngc7ubso4kkj0ta2jih@google.com")
+                                 exclude_uid="evt000000000000000000000002@google.com")
         assert c.start.hour == 9 and c.end.hour == 12

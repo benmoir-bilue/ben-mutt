@@ -59,7 +59,7 @@ def _capture_reply_prompt(make_thread, make_message, target):
 
     ai._stream = fake_stream
     thread = make_thread(
-        make_message(id="m1", from_name="Jeejee", from_address="jeejeeu@gmail.com",
+        make_message(id="m1", from_name="Dana", from_address="dana@example.com",
                      body_plain="my CV"),
         make_message(id="m2", from_name="Ben", from_address="ben@example.com",
                      body_plain="fwd to cam"),
@@ -69,9 +69,9 @@ def _capture_reply_prompt(make_thread, make_message, target):
 
 
 def test_reply_draft_targets_selected_message(make_thread, make_message):
-    target = make_message(from_name="Jeejee", from_address="jeejeeu@gmail.com")
+    target = make_message(from_name="Dana", from_address="dana@example.com")
     prompt = _capture_reply_prompt(make_thread, make_message, target)
-    assert "jeejeeu@gmail.com" in prompt
+    assert "dana@example.com" in prompt
     assert "not the most recent" in prompt
 
 
