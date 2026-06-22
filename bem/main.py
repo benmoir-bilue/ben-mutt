@@ -67,7 +67,7 @@ Example config:
 
   editor = "nvim"
   threads_per_page = 50
-  theme = "dark"
+  theme = "green"   # dark | light | green (1980s phosphor CRT)
 """)
 
 
