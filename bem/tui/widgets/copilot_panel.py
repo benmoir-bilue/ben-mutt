@@ -223,6 +223,8 @@ class CopilotPanel(Vertical):
         h = ranking.hero
         t.append("▶ DO THIS\n", style="bold cyan")
         t.append(f"  {h.headline}\n", style="bold")
+        if h.subject:
+            t.append(f"  ✉ {h.subject}\n", style="dim")
         if h.why:
             t.append(f"  why: {h.why}\n", style="dim italic")
         if h.action != "none":

@@ -554,11 +554,12 @@ def test_hero_card_renders_hero_and_on_deck():
     from bem.tui.widgets.copilot_panel import CopilotPanel
     from bem.ai.copilot import Ranking, RankedItem
     r = Ranking(
-        hero=RankedItem("h", "Marie", "SOW", "Reply to Marie on the SOW", "client waiting", "reply"),
+        hero=RankedItem("h", "Marie", "Re: SOW v3 — final", "Reply to Marie on the SOW", "client waiting", "reply"),
         on_deck=[RankedItem("d", "Xero", "Inv", "File the Xero invoice", "", "file")],
     )
     txt = CopilotPanel._hero_renderable(r).plain
     assert "DO THIS" in txt and "Reply to Marie on the SOW" in txt
+    assert "Re: SOW v3 — final" in txt          # the email's actual subject, under the heading
     assert "why: client waiting" in txt
     assert "on deck" in txt and "File the Xero invoice" in txt and "(file)" in txt
     assert "calm" in CopilotPanel._hero_renderable(Ranking()).plain   # empty → quiet line
