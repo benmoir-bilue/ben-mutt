@@ -33,6 +33,8 @@ BINDINGS_TABLE = [
     ("Space",       "Page down in preview",          "Pager"),
     ("b",           "Page up in preview",            "Pager"),
     ("j / k",       "Scroll line down / up",         "Pager"),
+    ("↑ / ↓",       "Move between links",            "Pager"),
+    ("Enter",       "Open selected link in browser",  "Pager"),
     ("J",           "Next thread",                   "Pager"),
     ("K",           "Prev thread",                   "Pager"),
     (":summarise",  "Summarise selected thread",     "AI"),

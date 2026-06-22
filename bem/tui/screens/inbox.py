@@ -768,6 +768,16 @@ class InboxScreen(
         msg_list.focus()
         event.stop()
 
+    def on_message_preview_link_focused(
+        self, event: MessagePreview.LinkFocused
+    ) -> None:
+        # Surface the target URL — markdown links hide it. The status bar is
+        # restored by _update_status() on the next thread/message highlight.
+        self.query_one(StatusBar).update(
+            f" link {event.index + 1}/{event.total} · ↑↓ move · ⏎ open  {event.url}"
+        )
+        event.stop()
+
     # ── Mutation worker ────────────────────────────────────────────────────────
 
 

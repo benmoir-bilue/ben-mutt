@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import webbrowser
 from datetime import datetime, timezone
 
 from rich.markup import escape as _e
@@ -42,9 +44,21 @@ class MessagePreview(RichLog):
     class PrevThread(TMessage):
         pass
 
+    class LinkFocused(TMessage):
+        """Posted as the user arrows between links, so the screen can surface the
+        target URL (markdown links hide it) in the status bar."""
+        def __init__(self, url: str, index: int, total: int) -> None:
+            super().__init__()
+            self.url = url
+            self.index = index
+            self.total = total
+
     def __init__(self, **kwargs) -> None:
         super().__init__(markup=True, wrap=True, highlight=False, **kwargs)
         self._thread: Thread | None = None
+        self._message: Message | None = None          # single-message view
+        self._links: list[str] = []                   # URLs, in document order
+        self._sel: int = -1                            # selected link, -1 = none
         self._invite: "CalendarInvite | None" = None  # invite → banner
         self._invite_kind: str | None = None          # disposition mark
         self._invite_conflicts: list = []             # for pending invites
@@ -66,19 +80,34 @@ class MessagePreview(RichLog):
 
     def show_thread(self, thread: Thread) -> None:
         self._thread = thread
-        self.clear()
-        self._write_invite_banner()
-        for i, msg in enumerate(thread.messages):
-            if i > 0:
-                self.write("─" * 72)
-            _write_message(self, msg)
+        self._message = None
+        self._sel = -1
+        self._render()
         self.call_after_refresh(self.scroll_home, animate=False)
 
     def show_message(self, message: Message) -> None:
+        self._thread = None
+        self._message = message
+        self._sel = -1
+        self._render()
+        self.call_after_refresh(self.scroll_home, animate=False)
+
+    def _render(self) -> None:
+        """(Re)draw the current thread/message. Rebuilds the link index, marking
+        the selected link so arrow-key navigation has something to highlight."""
+        self._links = []
         self.clear()
         self._write_invite_banner()
-        _write_message(self, message)
-        self.call_after_refresh(self.scroll_home, animate=False)
+        if self._thread is not None:
+            messages = self._thread.messages
+        elif self._message is not None:
+            messages = [self._message]
+        else:
+            messages = []
+        for i, msg in enumerate(messages):
+            if i > 0:
+                self.write("─" * 72)
+            _write_message(self, msg)
 
     def _write_invite_banner(self) -> None:
         if self._invite is None or self._invite_kind is None:
@@ -94,10 +123,60 @@ class MessagePreview(RichLog):
 
     def clear_preview(self) -> None:
         self._thread = None
+        self._message = None
+        self._links = []
+        self._sel = -1
         self.clear()
 
+    # ── Link navigation ──────────────────────────────────────────────────────
+
+    def _move_link(self, delta: int) -> None:
+        """Move the link selection by `delta`, wrapping, and redraw."""
+        n = len(self._links)
+        if n == 0:
+            return
+        if self._sel < 0:
+            self._sel = 0 if delta > 0 else n - 1
+        else:
+            self._sel = (self._sel + delta) % n
+        self._render()
+        self.post_message(self.LinkFocused(self._links[self._sel], self._sel, n))
+        self._scroll_to_selected()
+
+    def _scroll_to_selected(self) -> None:
+        """Bring the highlighted link into view by finding its marker line."""
+        for y, strip in enumerate(self.lines):
+            if _MARK in strip.text:
+                self.scroll_to(y=max(0, y - 2), animate=False)
+                return
+
+    def _open_selected(self) -> None:
+        if not (0 <= self._sel < len(self._links)):
+            return
+        url = self._links[self._sel]
+        try:
+            webbrowser.open(url)
+            self.app.notify(f"Opening {url}", timeout=3)
+        except Exception as e:  # pragma: no cover - platform dependent
+            self.app.notify(f"Couldn't open link: {e}", severity="error")
+
     def on_key(self, event: events.Key) -> None:
-        if event.key == "j":
+        if event.key in ("down", "right") and self._links:
+            self._move_link(1)
+            event.prevent_default()
+            event.stop()
+        elif event.key in ("up", "left") and self._links:
+            self._move_link(-1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "enter" and self._links:
+            if self._sel < 0:
+                self._move_link(1)
+            else:
+                self._open_selected()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "j":
             self.scroll_down()
             event.prevent_default()
         elif event.key == "k":
@@ -181,7 +260,29 @@ def _invite_banner_lines(kind: str, when: str, conflicts: list) -> list[str]:
     return []
 
 
-def _write_message(log: RichLog, msg: Message) -> None:
+# Prefix stamped on the selected link in both Markdown and plain bodies. Doubles
+# as the sentinel _scroll_to_selected() scans the rendered lines for.
+_MARK = "➤ "
+
+# One pass finds either a Markdown link [text](url) or a bare http(s) URL.
+_SCAN = re.compile(
+    r"\[(?P<text>[^\]]+)\]\((?P<mdurl>https?://[^)\s]+)\)"
+    r"|(?P<bare>https?://[^\s<>)\]\"']+)"
+)
+
+
+def _split_trailing(url: str) -> tuple[str, str]:
+    """Peel trailing punctuation off a bare URL (so 'see https://x.com.' doesn't
+    swallow the full stop). Returns (clean_url, trailing_text)."""
+    i = len(url)
+    while i and url[i - 1] in ".,;:!?'\"":
+        i -= 1
+    if i and url[i - 1] == ")" and "(" not in url[:i]:
+        i -= 1
+    return url[:i], url[i:]
+
+
+def _write_message(preview: "MessagePreview", msg: Message) -> None:
     dt_str = ""
     if msg.date:
         try:
@@ -190,26 +291,73 @@ def _write_message(log: RichLog, msg: Message) -> None:
         except Exception:
             pass
 
-    log.write(f"[bold]From:[/bold]    {_e(msg.from_name)} <{_e(msg.from_address)}>")
+    preview.write(f"[bold]From:[/bold]    {_e(msg.from_name)} <{_e(msg.from_address)}>")
     if msg.to:
-        log.write(f"[bold]To:[/bold]      {_e(', '.join(msg.to))}")
+        preview.write(f"[bold]To:[/bold]      {_e(', '.join(msg.to))}")
     if msg.cc:
-        log.write(f"[bold]Cc:[/bold]      {_e(', '.join(msg.cc))}")
-    log.write(f"[bold]Date:[/bold]    {dt_str}")
-    log.write(f"[bold]Subject:[/bold] {_e(msg.subject)}")
+        preview.write(f"[bold]Cc:[/bold]      {_e(', '.join(msg.cc))}")
+    preview.write(f"[bold]Date:[/bold]    {dt_str}")
+    preview.write(f"[bold]Subject:[/bold] {_e(msg.subject)}")
     if msg.attachments:
         names = ", ".join(a.filename for a in msg.attachments)
-        log.write(f"[bold]Attach:[/bold]  [yellow]{_e(names)}[/yellow]")
-    log.write("")
+        preview.write(f"[bold]Attach:[/bold]  [yellow]{_e(names)}[/yellow]")
+    preview.write("")
 
     if msg.body_is_html:
         # HTML emails arrive as Markdown — render it so headings, bold, lists,
-        # links and quotes display formatted instead of as raw syntax.
-        log.write(Markdown(msg.body))
+        # links and quotes display formatted instead of as raw syntax. Rewrite
+        # the link syntax first to register each URL and mark the selected one.
+        preview.write(Markdown(_mark_markdown(msg.body, preview)))
         return
 
     for line in msg.body.splitlines():
-        if line.startswith(">"):
-            log.write(f"[dim]{_e(line)}[/dim]")
+        if not line:
+            preview.write("")
+            continue
+        marked = _mark_plain(line, preview)
+        preview.write(f"[dim]{marked}[/dim]" if line.startswith(">") else marked)
+
+
+def _mark_markdown(body: str, preview: "MessagePreview") -> str:
+    """Register every link in `body` (in order) on the preview, normalise bare
+    URLs into Markdown links so they're navigable too, and stamp the selected
+    one with the marker + bold."""
+    def repl(m: re.Match) -> str:
+        trail = ""
+        if m.group("mdurl"):
+            url, text = m.group("mdurl"), m.group("text")
         else:
-            log.write(_e(line) if line else "")
+            url, trail = _split_trailing(m.group("bare"))
+            text = url
+        idx = len(preview._links)
+        preview._links.append(url)
+        if idx == preview._sel:
+            return f"[{_MARK}**{text}**]({url}){trail}"
+        return f"[{text}]({url}){trail}"
+
+    return _SCAN.sub(repl, body)
+
+
+def _mark_plain(line: str, preview: "MessagePreview") -> str:
+    """Build Rich markup for one plain-text line, styling URLs as links and
+    highlighting the selected one."""
+    out: list[str] = []
+    pos = 0
+    for m in _SCAN.finditer(line):
+        trail = ""
+        if m.group("mdurl"):
+            url, disp = m.group("mdurl"), m.group("text")
+        else:
+            url, trail = _split_trailing(m.group("bare"))
+            disp = url
+        out.append(_e(line[pos:m.start()]))
+        idx = len(preview._links)
+        preview._links.append(url)
+        if idx == preview._sel:
+            out.append(f"[b reverse]{_MARK}{_e(disp)}[/]")
+        else:
+            out.append(f"[u #5fafff]{_e(disp)}[/]")
+        out.append(_e(trail))
+        pos = m.end()
+    out.append(_e(line[pos:]))
+    return "".join(out)
