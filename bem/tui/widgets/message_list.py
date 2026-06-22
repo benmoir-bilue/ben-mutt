@@ -45,6 +45,8 @@ class MessageList(DataTable):
         Binding("G", "cursor_bottom", "Last", show=False),
         Binding("/", "search", "Search", show=False),
         Binding("v", "toggle_thread", "Expand/collapse thread", show=False),
+        Binding("right", "expand_thread", "Open thread", show=False),
+        Binding("left", "collapse_thread", "Close thread", show=False),
         Binding("V", "toggle_all_threads", "Expand/collapse all", show=False),
         Binding("P", "parent_message", "Parent message", show=False),
     ]
@@ -272,6 +274,24 @@ class MessageList(DataTable):
             self._expanded.discard(tid)
         else:
             self._expanded.add(tid)
+        self._rebuild(cursor_key=tid)
+
+    def action_expand_thread(self) -> None:
+        """Right arrow: open (expand) the thread under the cursor."""
+        tid = self._cursor_key().split(_SEP, 1)[0]
+        thread = self._thread_map.get(tid)
+        if not thread or thread.message_count <= 1 or tid in self._expanded:
+            return
+        self._expanded.add(tid)
+        self._rebuild(cursor_key=tid)
+
+    def action_collapse_thread(self) -> None:
+        """Left arrow: close (collapse) the thread under the cursor. From a
+        message row inside the thread, collapse the parent and land on it."""
+        tid = self._cursor_key().split(_SEP, 1)[0]
+        if tid not in self._expanded:
+            return
+        self._expanded.discard(tid)
         self._rebuild(cursor_key=tid)
 
     def action_toggle_all_threads(self) -> None:

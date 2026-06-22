@@ -70,6 +70,47 @@ async def test_v_expands_and_collapses_thread(threads):
 
 
 @pytest.mark.asyncio
+async def test_right_opens_left_closes_thread(threads):
+    app = ListApp(threads)
+    async with app.run_test() as pilot:
+        ml = app.query_one(MessageList)
+        ml.populate(threads)
+        ml.focus()
+        await pilot.pause()
+        assert ml.row_count == 2
+
+        await pilot.press("right")  # open multi-message thread t1
+        await pilot.pause()
+        assert ml.row_count == 5
+
+        await pilot.press("right")  # already open — no-op
+        await pilot.pause()
+        assert ml.row_count == 5
+
+        await pilot.press("j")       # onto a message row inside the thread
+        await pilot.press("left")    # close it from within
+        await pilot.pause()
+        assert ml.row_count == 2
+        assert app.events[-1] == ("thread", "t1")  # cursor lands on the thread row
+
+
+@pytest.mark.asyncio
+async def test_right_on_single_message_thread_is_noop(threads):
+    app = ListApp(threads)
+    async with app.run_test() as pilot:
+        ml = app.query_one(MessageList)
+        ml.populate(threads)
+        ml.focus()
+        await pilot.pause()
+        await pilot.press("j")       # move to the single-message thread t2
+        await pilot.pause()
+        assert app.events[-1] == ("thread", "t2")
+        await pilot.press("right")   # nothing to expand
+        await pilot.pause()
+        assert ml.row_count == 2
+
+
+@pytest.mark.asyncio
 async def test_parent_key_walks_up_the_tree(threads):
     app = ListApp(threads)
     async with app.run_test() as pilot:
