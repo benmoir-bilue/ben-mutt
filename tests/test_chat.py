@@ -364,6 +364,57 @@ async def test_send_chat_reply_tracks_name():
 
 
 @pytest.mark.asyncio
+async def test_chat_poll_interval_fast_then_normal():
+    from bem.tui.screens.inbox_copilot import CHAT_FAST_INTERVAL
+    from bem.ai import copilot
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._present = True
+        scr._chat_fast_remaining = 4
+        assert scr._chat_poll_interval() == CHAT_FAST_INTERVAL     # brisk while fast window open
+        scr._chat_fast_remaining = 0
+        assert scr._chat_poll_interval() == copilot.poll_interval(present=True)   # back to mail cadence
+
+
+@pytest.mark.asyncio
+async def test_cadence_stays_fast_on_reply_ramps_down_when_quiet():
+    from bem.tui.screens.inbox_copilot import CHAT_FAST_CYCLES
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._chat_fast_remaining = 3
+        scr._after_chat_poll(1)                       # a reply landed
+        assert scr._chat_fast_remaining == CHAT_FAST_CYCLES   # re-armed to full fast window
+        scr._after_chat_poll(0)                       # quiet round
+        scr._after_chat_poll(0)
+        assert scr._chat_fast_remaining == CHAT_FAST_CYCLES - 2   # counting down
+        # drain the rest → never goes negative, settles at 0 (normal cadence)
+        for _ in range(CHAT_FAST_CYCLES):
+            scr._after_chat_poll(0)
+        assert scr._chat_fast_remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_sending_bumps_to_fast_polling():
+    import asyncio
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._chat = _FakeChat([])
+        assert scr._chat_fast_remaining == 0
+        await asyncio.to_thread(scr._chat_send, "ping me")   # a send re-arms fast polling
+        await pilot.pause()
+        from bem.tui.screens.inbox_copilot import CHAT_FAST_CYCLES
+        assert scr._chat_fast_remaining == CHAT_FAST_CYCLES
+
+
+@pytest.mark.asyncio
 async def test_chat_send_prefers_webhook_when_set():
     import asyncio
     from bem.config import Config

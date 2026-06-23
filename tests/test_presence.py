@@ -25,9 +25,10 @@ class TestIsPresent:
     def test_away_when_idle_past_threshold(self):
         assert presence.is_present(idle=presence.AWAY_IDLE_SECS + 1) is False
 
-    def test_unknown_defaults_to_present(self):
-        assert presence.is_present(idle=None) in (True,)  # None probe → assume here
-        # explicit: a None idle reading means "assume present"
+    def test_unknown_defaults_to_present(self, monkeypatch):
+        # A probe that can't read idle time (non-mac / failure) → assume present.
+        # Stub the probe so the result doesn't depend on this machine's real idle.
+        monkeypatch.setattr(presence, "idle_seconds", lambda: None)
         assert presence.is_present(idle=None) is True
 
 

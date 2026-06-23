@@ -63,6 +63,12 @@ def _is_vip(sender_name: str, sender_address: str, matchers: list[str]) -> bool:
     return any(m.strip() and m.strip().lower() in hay for m in matchers)
 
 
+# Adaptive Chat polling: after Mutt sends (or while you're replying), check every
+# CHAT_FAST_INTERVAL seconds for up to CHAT_FAST_CYCLES idle rounds, then ramp back
+# to the mail cadence (60s present / longer when away).
+CHAT_FAST_INTERVAL = 5.0
+CHAT_FAST_CYCLES = 10
+
 # "send chat message …" / "test chat …" in the talk window → fire a test Chat send.
 _CHAT_TEST_RE = re.compile(r"^\s*(send(\s+a)?|test)\s+chat\b", re.IGNORECASE)
 
@@ -87,6 +93,9 @@ class CopilotMixin:
             if self._copilot_timer is not None:
                 self._copilot_timer.stop()
                 self._copilot_timer = None
+            if self._chat_timer is not None:
+                self._chat_timer.stop()
+                self._chat_timer = None
             panel.stop()
             self.notify("Mutt is off")
             return
@@ -105,7 +114,6 @@ class CopilotMixin:
         self._copilot_on = True
         self._copilot_feed = []
         self._copilot_undo = []
-        self._chat_after = None   # re-baseline Chat polling so we don't replay a backlog
         # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
         # then give an initial digest of the top few threads already sitting here.
         self._seen_thread_ids = {t.id for t in self._threads}
@@ -119,6 +127,7 @@ class CopilotMixin:
         self.notify("Mutt is on watch 🐕")
         self._copilot_curate(self._threads)
         self._schedule_copilot_poll()
+        self._start_chat_polling()
 
     def _schedule_copilot_poll(self) -> None:
         if not self._copilot_on:
@@ -149,8 +158,6 @@ class CopilotMixin:
             return
         if not worker.is_cancelled:
             self.app.call_from_thread(self._on_copilot_fetch, threads, token, present)
-        if not worker.is_cancelled:
-            self._poll_chat_instructions()
 
     @staticmethod
     def _inbox_signature(threads: list[Thread]) -> frozenset:
@@ -424,6 +431,8 @@ class CopilotMixin:
             self.app.call_from_thread(self._panel_chat_out, text)
         else:
             self.app.call_from_thread(self._panel_chat_sent)
+        # We just messaged Ben — watch briskly for his reply.
+        self.app.call_from_thread(self._bump_chat_polling)
         return True
 
     def _panel_chat_out(self, text: str) -> None:
@@ -435,22 +444,74 @@ class CopilotMixin:
     def _panel_say(self, text: str) -> None:
         self.query_one(CopilotPanel).post_mutt(text)
 
-    def _poll_chat_instructions(self) -> None:
-        """Worker thread: read new messages in the Chat space and treat Ben's
-        replies as instructions for Mutt. Runs on the copilot poll cadence."""
-        if not self.config.google_chat_space or not self._copilot_on:
+    # ── Adaptive Chat polling ─────────────────────────────────────────────────
+    # Right after Mutt sends (or while you're replying) check briskly; when the
+    # conversation goes quiet, ramp back to the mail cadence so we don't burn API
+    # calls watching a dead thread.
+
+    def _start_chat_polling(self) -> None:
+        """Begin the Chat poll loop (only meaningful when a space is set — reading
+        replies needs the API; a webhook-only setup is send-only)."""
+        if not self.config.google_chat_space:
             return
+        self._chat_fast_remaining = 0
+        self._chat_after = None        # re-baseline so we don't replay backlog
+        self._schedule_chat_poll()
+
+    def _chat_poll_interval(self) -> float:
+        if self._chat_fast_remaining > 0:
+            return CHAT_FAST_INTERVAL
+        return copilot_mod.poll_interval(present=self._present)
+
+    def _schedule_chat_poll(self) -> None:
+        if not self._copilot_on or not self.config.google_chat_space:
+            return
+        self._chat_timer = self.set_timer(self._chat_poll_interval(), self._chat_poll)
+
+    def _chat_poll(self) -> None:
+        if self._copilot_on and self.config.google_chat_space:
+            self._chat_poll_worker()
+
+    @work(thread=True, exclusive=True, group="chat-poll", exit_on_error=False)
+    def _chat_poll_worker(self) -> None:
+        got = self._poll_chat_instructions()
+        self.app.call_from_thread(self._after_chat_poll, got)
+
+    def _after_chat_poll(self, got: int) -> None:
+        """Main thread: adapt the cadence, then schedule the next poll. Replies
+        coming in keep it brisk; an idle round counts down the fast window."""
+        if got:
+            self._chat_fast_remaining = CHAT_FAST_CYCLES
+        elif self._chat_fast_remaining > 0:
+            self._chat_fast_remaining -= 1
+        self._schedule_chat_poll()
+
+    def _bump_chat_polling(self) -> None:
+        """A message just went out — poll briskly for a reply, starting now."""
+        self._chat_fast_remaining = CHAT_FAST_CYCLES
+        if not self._copilot_on or not self.config.google_chat_space:
+            return
+        if self._chat_timer is not None:
+            self._chat_timer.stop()
+        self._schedule_chat_poll()
+
+    def _poll_chat_instructions(self) -> int:
+        """Worker thread: read new messages in the Chat space and treat Ben's
+        replies as instructions for Mutt. Returns how many were dispatched."""
+        if not self.config.google_chat_space or not self._copilot_on:
+            return 0
         if self._chat_after is None:
             # First poll: baseline at "now" so we don't replay old history.
             self._chat_after = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            return
+            return 0
         try:
             msgs = self._chat_client().list_messages(
                 self.config.google_chat_space, after=self._chat_after
             )
         except Exception as e:
             log.debug("chat poll failed: %s", e)
-            return
+            return 0
+        got = 0
         for m in msgs:
             if m.create_time and m.create_time > self._chat_after:
                 self._chat_after = m.create_time
@@ -458,7 +519,9 @@ class CopilotMixin:
                 continue        # Mutt's own ping/reply — never act on it
             text = (m.text or "").strip()
             if text:
+                got += 1
                 self.app.call_from_thread(self._on_chat_instruction, text)
+        return got
 
     def _on_chat_instruction(self, text: str) -> None:
         """Main thread: an instruction arrived from Chat — show it in the talk

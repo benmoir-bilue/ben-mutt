@@ -313,6 +313,8 @@ class InboxScreen(
         self._chat_pinged: set[str] = set()             # threads already pinged about
         self._chat_sent_names: set[str] = set()         # message ids Mutt posted (skip on read)
         self._chat_after: Optional[str] = None          # RFC3339 high-water mark for polling
+        self._chat_timer: Optional[Timer] = None        # adaptive Chat poll timer
+        self._chat_fast_remaining: int = 0              # brisk-poll rounds left after a send/reply
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)
