@@ -51,8 +51,13 @@ class Config:
     safe_mode: bool = True
     # Google Chat space (e.g. "spaces/AAAA…") Mutt pings when you're away and
     # something urgent/VIP lands. Empty disables Chat pings. Find it with
-    # `bem chat-spaces`.
+    # `bem chat-spaces`. Used both to send (via the API) and to read your replies.
     google_chat_space: str = ""
+    # Incoming-webhook URL for the same space. When set, Mutt SENDS through it so
+    # messages are authored by the webhook app (not you) and your phone actually
+    # notifies. Reading replies still needs google_chat_space. Create one in the
+    # space: Apps & integrations → Webhooks → Add webhook.
+    google_chat_webhook: str = ""
     ai_model_fast: str = "claude-haiku-4-5-20251001"   # triage, summarise, explain
     ai_model_smart: str = "claude-sonnet-4-6"           # reply-draft, custom
     ai_model_agent: str = "claude-opus-4-8"             # agentic :sort / :agent

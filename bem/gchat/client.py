@@ -9,7 +9,9 @@ to (you can't DM yourself in Chat) — configure its id with `bem chat-spaces`.
 """
 from __future__ import annotations
 
+import json
 import threading
+import urllib.request
 from dataclasses import dataclass
 
 import httplib2
@@ -53,7 +55,8 @@ class ChatClient:
         return self._local.service
 
     def send(self, space: str, text: str) -> str:
-        """Post a plain-text message to `space`. Returns the created message name."""
+        """Post a plain-text message to `space` as the user (no notification to
+        yourself). Returns the created message name."""
         if not space:
             raise ValueError("no Google Chat space configured")
         resp = (
@@ -62,6 +65,21 @@ class ChatClient:
             .execute()
         )
         return resp.get("name", "")
+
+    @staticmethod
+    def send_webhook(url: str, text: str) -> str:
+        """Post via an incoming webhook — authored by the webhook app, so it
+        actually notifies you. Needs no credentials. Returns the message name."""
+        if not url:
+            raise ValueError("no Google Chat webhook configured")
+        data = json.dumps({"text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json; charset=UTF-8"},
+        )
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return body.get("name", "")
 
     def list_messages(
         self, space: str, after: str | None = None, limit: int = 25

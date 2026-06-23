@@ -374,9 +374,13 @@ class CopilotMixin:
             return ("urgent", note.summary)
         return None
 
+    def _chat_send_enabled(self) -> bool:
+        """Can Mutt send to Chat? A webhook (preferred, notifies you) or a space."""
+        return bool(self.config.google_chat_webhook or self.config.google_chat_space)
+
     def _maybe_chat_ping(self, new_threads: list[Thread]) -> None:
         """While away, message Ben on Google Chat about urgent/VIP arrivals."""
-        if not self.config.google_chat_space or not self._copilot_on:
+        if not self._chat_send_enabled() or not self._copilot_on:
             return
         from bem.ai import memory
         vips = memory.load_vips()
@@ -403,10 +407,15 @@ class CopilotMixin:
         self._chat_send("\n".join(lines))   # also echoes the outgoing in the talk panel
 
     def _chat_send(self, text: str, echo_full: bool = True) -> bool:
-        """Worker-thread: post `text` to the Chat space, track its id so the
-        poll won't read it back, and surface it in the talk panel."""
+        """Worker-thread: post `text` to Chat, track its id so the poll won't read
+        it back, and surface it in the talk panel. Prefers the webhook (authored
+        by the app, so your phone notifies) over the user-authored API send."""
         try:
-            name = self._chat_client().send(self.config.google_chat_space, text)
+            client = self._chat_client()
+            if self.config.google_chat_webhook:
+                name = client.send_webhook(self.config.google_chat_webhook, text)
+            else:
+                name = client.send(self.config.google_chat_space, text)
             self._chat_sent_names.add(name)
         except Exception as e:
             log.debug("chat send failed: %s", e)
@@ -708,8 +717,8 @@ class CopilotMixin:
         """'send chat message …' in the talk window → post it to the Chat space
         so Ben can test the round-trip; his reply comes back via the poll."""
         panel = self.query_one(CopilotPanel)
-        if not self.config.google_chat_space:
-            panel.post_mutt("No Chat space set — add google_chat_space (see: bem chat-spaces).")
+        if not self._chat_send_enabled():
+            panel.post_mutt("No Chat target set — add google_chat_webhook (or google_chat_space).")
             return
         msg = _chat_test_payload(text) or "🐕 test from the talk window — reply here and I'll bring it back."
         panel.post_note("sending to Chat…", "dim")

@@ -71,24 +71,33 @@ def chat_spaces() -> None:
 
 @main.command(name="chat-test")
 def chat_test() -> None:
-    """Send a test message to the configured Google Chat space."""
+    """Send a test message — via the webhook if set (notifies you), else the API."""
     config = Config.load()
-    if not config.google_chat_space:
-        click.echo("Set google_chat_space in config.toml first (see: bem chat-spaces).")
-        sys.exit(1)
     from bem.gchat import ChatClient
+    msg = "🐕 Mutt test — Chat pings are wired up."
+    if config.google_chat_webhook:
+        try:
+            ChatClient(None).send_webhook(config.google_chat_webhook, msg)
+        except Exception as e:
+            click.echo(f"Webhook failed: {e}")
+            sys.exit(1)
+        click.echo("Sent via webhook. You should get a phone notification.")
+        return
+    if not config.google_chat_space:
+        click.echo("Set google_chat_webhook (recommended) or google_chat_space first.")
+        click.echo("See: bem chat-spaces, and the setup notes in: bem setup.")
+        sys.exit(1)
     try:
         creds = authenticate()
     except SystemExit:
         sys.exit(1)
     try:
-        ChatClient(creds).send(
-            config.google_chat_space, "🐕 Mutt test — Chat pings are wired up."
-        )
+        ChatClient(creds).send(config.google_chat_space, msg)
     except Exception as e:
         click.echo(f"Failed: {e}")
         sys.exit(1)
-    click.echo("Sent. Check Google Chat.")
+    click.echo("Sent via API. NOTE: API messages are authored by you, so your "
+               "phone won't notify — set google_chat_webhook for alerts.")
 
 
 @main.command()
@@ -108,10 +117,14 @@ Config directory: {CONFIG_DIR}
 5. Run `bem` to authenticate and open your inbox.
 
 Google Chat (optional — Mutt messages you when away, and acts on your replies):
-  • Run `bem chat-spaces` to list your spaces, then set google_chat_space.
-  • `bem chat-test` sends a test message to confirm it works.
-  • Reply in that space with instructions ("archive the invoice") and Mutt
-    picks them up on his next poll and answers back there.
+  • Create a space (just you), then add an incoming webhook to it:
+      space → Apps & integrations → Webhooks → Add webhook → name it "Mutt".
+    Put its URL in config as google_chat_webhook — messages then come from the
+    webhook (not you), so your phone actually NOTIFIES you.
+  • For two-way (Mutt reading your replies): also run `bem chat-spaces`, and set
+    google_chat_space to that space's id.
+  • `bem chat-test` sends a test message; reply in the space with instructions
+    ("archive the invoice") and Mutt picks them up on his next poll.
 
 Config file: {CONFIG_DIR / "config.toml"}
 Example config:
@@ -119,6 +132,7 @@ Example config:
   editor = "nvim"
   threads_per_page = 50
   theme = "green"   # dark | light | green (1980s phosphor CRT)
+  google_chat_webhook = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=…"
   google_chat_space = "spaces/AAAA…"   # bem chat-spaces to find yours
 """)
 

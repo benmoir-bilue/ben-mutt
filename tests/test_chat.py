@@ -64,6 +64,33 @@ def test_send_without_space_raises():
         _client().send("", "hi")
 
 
+def test_send_webhook_posts_json(monkeypatch):
+    import bem.gchat.client as gc
+    captured = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"name": "spaces/A/messages/wh1"}'
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["data"] = req.data
+        captured["method"] = req.get_method()
+        return _Resp()
+
+    monkeypatch.setattr(gc.urllib.request, "urlopen", fake_urlopen)
+    name = ChatClient.send_webhook("https://chat.googleapis.com/v1/spaces/A/messages?key=k", "hi there")
+    assert name == "spaces/A/messages/wh1"
+    assert captured["method"] == "POST"
+    assert b'"text": "hi there"' in captured["data"]
+
+
+def test_send_webhook_without_url_raises():
+    with pytest.raises(ValueError):
+        ChatClient.send_webhook("", "hi")
+
+
 def test_list_spaces_paginates_and_maps_fields():
     pages = [
         {"spaces": [{"name": "spaces/A", "displayName": "Team", "spaceType": "SPACE"}],
@@ -244,11 +271,15 @@ class _FakeChat:
     def __init__(self, messages):
         self._messages = messages
         self.sent = []
+        self.webhooked = []
     def list_messages(self, space, after=None, limit=25):
         return [m for m in self._messages if not after or m.create_time > after]
     def send(self, space, text):
         self.sent.append(text)
         return f"{space}/messages/sent{len(self.sent)}"
+    def send_webhook(self, url, text):
+        self.webhooked.append((url, text))
+        return f"spaces/W/messages/wh{len(self.webhooked)}"
 
 
 def _screen_app():
@@ -330,6 +361,26 @@ async def test_send_chat_reply_tracks_name():
         await pilot.pause()
         assert scr._chat.sent == ["done — archived it"]
         assert "spaces/X/messages/sent1" in scr._chat_sent_names   # won't be read back
+
+
+@pytest.mark.asyncio
+async def test_chat_send_prefers_webhook_when_set():
+    import asyncio
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from tests.test_copilot import _FakeGmail
+    app = BemApp(gmail=_FakeGmail(), config=Config(
+        google_chat_space="spaces/X",
+        google_chat_webhook="https://chat.googleapis.com/v1/spaces/X/messages?key=k"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._chat = _FakeChat([])
+        await asyncio.to_thread(scr._chat_send, "ping me")
+        await pilot.pause()
+        assert scr._chat.webhooked and scr._chat.webhooked[0][1] == "ping me"
+        assert scr._chat.sent == []                          # API send not used
+        assert "spaces/W/messages/wh1" in scr._chat_sent_names
 
 
 # ── Test-send + conversation shown in the talk panel ──────────────────────────
