@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import traceback
 from collections import Counter
@@ -60,6 +61,22 @@ def _is_vip(sender_name: str, sender_address: str, matchers: list[str]) -> bool:
     the name or address) — the same loose matching Mutt's memory uses."""
     hay = f"{sender_name} {sender_address}".lower()
     return any(m.strip() and m.strip().lower() in hay for m in matchers)
+
+
+# "send chat message …" / "test chat …" in the talk window → fire a test Chat send.
+_CHAT_TEST_RE = re.compile(r"^\s*(send(\s+a)?|test)\s+chat\b", re.IGNORECASE)
+
+
+def _is_chat_test_request(text: str) -> bool:
+    return bool(_CHAT_TEST_RE.match(text or ""))
+
+
+def _chat_test_payload(text: str) -> str:
+    """The message body to send, after stripping the trigger + filler words."""
+    body = _CHAT_TEST_RE.sub("", text or "", count=1).strip()
+    body = re.sub(r"^(message|msg|saying|that says|to chat)\b\s*[:,-]?\s*", "",
+                  body, flags=re.IGNORECASE).strip()
+    return body
 
 
 class CopilotMixin:
@@ -383,19 +400,31 @@ class CopilotMixin:
         if note:
             lines.append(f"  {note}")
         lines.append("I'll hold it up top for you. Reply/return when you can.")
-        try:
-            name = self._chat_client().send(self.config.google_chat_space, "\n".join(lines))
-            self._chat_sent_names.add(name)   # don't read our own ping back as an instruction
-        except Exception as e:
-            log.debug("chat ping failed: %s", e)
-            return
-        if not worker.is_cancelled:
-            self.app.call_from_thread(self._note_chat_pinged, sender)
+        self._chat_send("\n".join(lines))   # also echoes the outgoing in the talk panel
 
-    def _note_chat_pinged(self, sender: str) -> None:
-        self.query_one(CopilotPanel).post_note(
-            f"📱 pinged you on Chat about {sender}", "dim"
-        )
+    def _chat_send(self, text: str, echo_full: bool = True) -> bool:
+        """Worker-thread: post `text` to the Chat space, track its id so the
+        poll won't read it back, and surface it in the talk panel."""
+        try:
+            name = self._chat_client().send(self.config.google_chat_space, text)
+            self._chat_sent_names.add(name)
+        except Exception as e:
+            log.debug("chat send failed: %s", e)
+            return False
+        if echo_full:
+            self.app.call_from_thread(self._panel_chat_out, text)
+        else:
+            self.app.call_from_thread(self._panel_chat_sent)
+        return True
+
+    def _panel_chat_out(self, text: str) -> None:
+        self.query_one(CopilotPanel).post_chat_out(text)
+
+    def _panel_chat_sent(self) -> None:
+        self.query_one(CopilotPanel).post_note("↗ sent to Chat", "dim")
+
+    def _panel_say(self, text: str) -> None:
+        self.query_one(CopilotPanel).post_mutt(text)
 
     def _poll_chat_instructions(self) -> None:
         """Worker thread: read new messages in the Chat space and treat Ben's
@@ -423,26 +452,20 @@ class CopilotMixin:
                 self.app.call_from_thread(self._on_chat_instruction, text)
 
     def _on_chat_instruction(self, text: str) -> None:
-        """Main thread: an instruction arrived from Chat — show it and let Mutt
-        act, sending his reply back to the space."""
+        """Main thread: an instruction arrived from Chat — show it in the talk
+        panel and let Mutt act, sending his reply back to the space."""
         if not self._copilot_on:
             return
-        panel = self.query_one(CopilotPanel)
-        panel.post_note("📱 from Chat:", "dim")
-        panel.post_user(text)
+        self.query_one(CopilotPanel).post_chat_in(text)
         if self._is_demo_request(text):
             self._copilot_demo_worker()
         else:
             self._copilot_chat_worker(text, to_chat=True)
 
     def _send_chat_reply(self, text: str) -> None:
-        """Send Mutt's reply back to the Chat space, tracking it so the next
-        poll doesn't read it back as a fresh instruction."""
-        try:
-            name = self._chat_client().send(self.config.google_chat_space, text)
-            self._chat_sent_names.add(name)
-        except Exception as e:
-            log.debug("chat reply failed: %s", e)
+        """Send Mutt's reply to the Chat space. The reply is already shown in the
+        panel by the chat worker, so just mark that it went out (echo_full=False)."""
+        self._chat_send(text, echo_full=False)
 
     def _return_from_away(self) -> None:
         """Ben's back — lead with what changed while he was out."""
@@ -659,10 +682,7 @@ class CopilotMixin:
             self._copilot_curate(self._threads)
 
     def on_copilot_panel_chat_submitted(self, event: CopilotPanel.ChatSubmitted) -> None:
-        if self._is_demo_request(event.text):
-            self._copilot_demo_worker()
-        else:
-            self._copilot_chat_worker(event.text)
+        self._route_copilot_input(event.text)
         event.stop()
 
     def _copilot_say(self, message: str) -> None:
@@ -672,10 +692,35 @@ class CopilotMixin:
             if not self._copilot_on:
                 return  # no API key
         self.query_one(CopilotPanel).post_user(message)
-        if self._is_demo_request(message):
+        self._route_copilot_input(message)
+
+    def _route_copilot_input(self, text: str) -> None:
+        """Send what Ben typed in the talk window to the right handler: a Chat
+        test send, the autopilot demo, or the chat brain."""
+        if _is_chat_test_request(text):
+            self._chat_test_from_panel(text)
+        elif self._is_demo_request(text):
             self._copilot_demo_worker()
         else:
-            self._copilot_chat_worker(message)
+            self._copilot_chat_worker(text)
+
+    def _chat_test_from_panel(self, text: str) -> None:
+        """'send chat message …' in the talk window → post it to the Chat space
+        so Ben can test the round-trip; his reply comes back via the poll."""
+        panel = self.query_one(CopilotPanel)
+        if not self.config.google_chat_space:
+            panel.post_mutt("No Chat space set — add google_chat_space (see: bem chat-spaces).")
+            return
+        msg = _chat_test_payload(text) or "🐕 test from the talk window — reply here and I'll bring it back."
+        panel.post_note("sending to Chat…", "dim")
+        self._chat_test_worker(msg)
+
+    @work(thread=True, group="chat-ping", exit_on_error=False)
+    def _chat_test_worker(self, msg: str) -> None:
+        if not self._chat_send(msg, echo_full=True):
+            self.app.call_from_thread(
+                self._panel_say, "Couldn't reach Chat — check the API/space setup."
+            )
 
     @work(thread=True, exclusive=True, group="copilot-chat", exit_on_error=False)
     def _copilot_chat_worker(self, text: str, to_chat: bool = False) -> None:

@@ -286,6 +286,18 @@ class CopilotPanel(Vertical):
     def post_note(self, text: str, style: str = "dim") -> None:
         self._feed.write(Text(text, style=style))
 
+    def post_chat_out(self, text: str) -> None:
+        """A message Mutt sent to the Google Chat space (outgoing)."""
+        self._feed.write(Text(""))
+        for i, line in enumerate(text.splitlines() or [""]):
+            prefix = "📤 to Chat: " if i == 0 else "           "
+            self._feed.write(Text(f"{prefix}{line}", style="cyan"))
+
+    def post_chat_in(self, text: str) -> None:
+        """A reply that arrived from you in the Google Chat space (incoming)."""
+        self._feed.write(Text(""))
+        self._feed.write(Text(f"📥 from Chat: {text}", style="bold cyan"))
+
     def focus_input(self) -> None:
         if self.is_on:
             self.query_one("#copilot-input", Input).focus()

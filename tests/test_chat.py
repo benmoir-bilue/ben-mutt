@@ -320,11 +320,89 @@ async def test_on_chat_instruction_runs_brain_to_chat():
 
 @pytest.mark.asyncio
 async def test_send_chat_reply_tracks_name():
+    import asyncio
     app = _screen_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         scr = app.screen
         scr._chat = _FakeChat([])
-        scr._send_chat_reply("done — archived it")
+        await asyncio.to_thread(scr._send_chat_reply, "done — archived it")
+        await pilot.pause()
         assert scr._chat.sent == ["done — archived it"]
         assert "spaces/X/messages/sent1" in scr._chat_sent_names   # won't be read back
+
+
+# ── Test-send + conversation shown in the talk panel ──────────────────────────
+def test_chat_test_trigger_and_payload():
+    from bem.tui.screens.inbox_copilot import _is_chat_test_request, _chat_test_payload
+    assert _is_chat_test_request("send chat message hello")
+    assert _is_chat_test_request("send a chat saying hi")
+    assert _is_chat_test_request("test chat")
+    assert not _is_chat_test_request("archive 1")
+    assert _chat_test_payload("send chat message hello world") == "hello world"
+    assert _chat_test_payload("send a chat saying: hi there") == "hi there"
+    assert _chat_test_payload("test chat") == ""
+
+
+@pytest.mark.asyncio
+async def test_talk_input_routes_send_chat_to_test():
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        tested, brained = [], []
+        scr._chat_test_from_panel = lambda text: tested.append(text)
+        scr._copilot_chat_worker = lambda text, to_chat=False: brained.append(text)
+        scr._is_demo_request = lambda t: False
+        scr._route_copilot_input("send chat message ping")
+        scr._route_copilot_input("archive 1")
+        assert tested == ["send chat message ping"]   # test send
+        assert brained == ["archive 1"]                # ordinary talk → brain
+
+
+@pytest.mark.asyncio
+async def test_chat_test_from_panel_dispatches_payload():
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        sent = []
+        scr._chat_test_worker = lambda msg: sent.append(msg)
+        scr._chat_test_from_panel("send chat message ping me")
+        assert sent == ["ping me"]
+
+
+@pytest.mark.asyncio
+async def test_chat_test_from_panel_warns_without_space():
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from tests.test_copilot import _FakeGmail
+    app = BemApp(gmail=_FakeGmail(), config=Config())   # no google_chat_space
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        sent = []
+        scr._chat_test_worker = lambda msg: sent.append(msg)
+        scr._chat_test_from_panel("send chat message hi")
+        assert sent == []   # no space → nothing dispatched
+
+
+@pytest.mark.asyncio
+async def test_panel_shows_chat_in_and_out():
+    from textual.app import App, ComposeResult
+    from bem.tui.widgets.copilot_panel import CopilotPanel
+    class P(App):
+        def compose(self) -> ComposeResult:
+            yield CopilotPanel(id="copilot")
+    app = P()
+    async with app.run_test() as pilot:
+        panel = app.query_one(CopilotPanel)
+        panel.display = True            # size the feed so writes flush (start() would add $accent)
+        await pilot.pause()
+        panel.post_chat_out("hello space")
+        panel.post_chat_in("got it")
+        await pilot.pause()
+        text = "\n".join(s.text for s in panel.query_one("#copilot-feed").lines)
+        assert "to Chat: hello space" in text
+        assert "from Chat: got it" in text
