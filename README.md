@@ -73,6 +73,10 @@ filing, summarising, and drafting.
   triages each arrival, and posts a numbered feed you can act on
   conversationally (*"archive 3"*, *"reply to the invoice"*). It can even drive
   the TUI on request.
+- **Mutt reaches you on Google Chat** — when you step away from the desk, Mutt
+  pings you on Google Chat about urgent or VIP mail, and you can **reply with
+  instructions** (*"archive the invoice"*) that it picks up and acts on. The
+  whole exchange is mirrored in the talk panel.
 - **Google Calendar invites** — invites are marked *pending / accepted / maybe /
   declined / cancelled / out-of-sync* inline; RSVP with `A` / `M` / `X`, and
   `:cal-clean` clears handled invite mail.
@@ -128,7 +132,8 @@ with the app. Run `bem setup` at any time to print these instructions.
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (or select an existing one).
-3. Enable the **Gmail API** and the **Google Calendar API**
+3. Enable the **Gmail API**, the **Google Calendar API**, and — if you want
+   Mutt's Google Chat alerts — the **Google Chat API**
    (*APIs & Services → Enable APIs*).
 4. Create credentials: *APIs & Services → Credentials → Create Credentials →
    OAuth client ID*. Choose **Desktop app** as the application type.
@@ -142,9 +147,13 @@ bem requests these OAuth scopes on first run:
 
 - `https://www.googleapis.com/auth/gmail.modify`
 - `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/chat.messages` — send/read Chat messages
+- `https://www.googleapis.com/auth/chat.spaces.readonly` — list your Chat spaces
 
 > Calendar's write scope is requested up front so that detecting an invite's
-> status now and accepting/declining it later share a single consent.
+> status now and accepting/declining it later share a single consent. The Chat
+> scopes power Mutt's away alerts (see below); adding or changing scopes forces a
+> one-time re-consent on the next launch.
 
 ### 2. (Optional) Enable AI features
 
@@ -168,6 +177,36 @@ On first launch, bem opens your browser to complete the Google OAuth consent
 flow, caches a refresh token at `~/.config/bem/token.json`, and drops you into
 your inbox.
 
+### 4. (Optional) Mutt on Google Chat
+
+So Mutt can message you when you step away — and act on your replies — give it a
+Google Chat space to talk in. You'll set up to two values in `config.toml`:
+
+1. **Create a space** in Google Chat just for yourself (e.g. *"Mutt"*).
+2. **Add an incoming webhook** to it (*space → Apps & integrations → Webhooks →
+   Add webhook*, name it *"Mutt"*), copy the URL, and set:
+
+   ```toml
+   google_chat_webhook = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=…"
+   ```
+
+   Sending through the webhook means messages are authored by the webhook app,
+   not by you — so your phone actually **notifies** you (Chat never notifies you
+   about your own messages).
+3. **For two-way** (so Mutt reads your replies and acts on them), also set the
+   space id — run `bem chat-spaces` to list yours:
+
+   ```toml
+   google_chat_space = "spaces/AAAA…"
+   ```
+
+Then `bem chat-test` sends a test message to confirm it works. With both set,
+Mutt pings you about urgent/VIP mail while you're away and picks up your replies
+on an adaptive poll (brisk while you're chatting, slowing down when quiet).
+
+> One-way today: Mutt reads your replies and acts, but can't be driven purely by
+> Chat without the app being open. Away-detection is macOS-only for now.
+
 ---
 
 ## Usage
@@ -177,6 +216,8 @@ bem            # open the inbox (default)
 bem run        # same as above
 bem auth       # clear the cached token and re-run the OAuth flow
 bem setup      # print setup instructions
+bem chat-spaces  # list your Google Chat spaces + ids (for google_chat_space)
+bem chat-test    # send a test message to your configured Chat space/webhook
 bem version    # print the version
 ```
 
@@ -192,6 +233,7 @@ Press `?` at any time for the in-app keybinding cheatsheet.
 | `gg`     | First thread |
 | `G`      | Last thread |
 | `v`      | Expand / collapse thread |
+| `→` / `←`| Open / close the thread under the cursor |
 | `V`      | Expand / collapse all threads |
 | `P`      | Jump to parent message |
 | `Enter`  | Open thread + focus preview |
@@ -217,6 +259,8 @@ Press `?` at any time for the in-app keybinding cheatsheet.
 | `Space`  | Page down |
 | `b`      | Page up |
 | `j` / `k`| Scroll line down / up |
+| `↑` / `↓`| Move between links in the message |
+| `Enter`  | Open the selected link in your browser |
 | `J`      | Next thread |
 | `K`      | Previous thread |
 
@@ -271,8 +315,9 @@ Press `?` at any time for the in-app keybinding cheatsheet.
 |---------|--------|
 | `:cal-clean` | Count calendar emails that are safe to delete |
 | `:cal-clean!` | Trash all handled invite mail (accepted / maybe / declined / cancelled) |
-| `:move <label>` | Move the thread to a label (creates it if missing) |
-| `:folder <name>` (`:cd`, `:go`) | Switch to a folder by name (Mutt can drive this too) |
+| `:move <label>` | Move the thread to a label (creates it if missing; `Tab` autocompletes the folder name) |
+| `:folder <name>` (`:cd`, `:go`) | Switch to a folder by name (`Tab` autocompletes; Mutt can drive this too) |
+| `:theme <name>` | Switch theme: `dark`, `light`, or `green` (1980s phosphor CRT) |
 | `:search <query>` | Search Gmail with native query syntax |
 | `:refresh` | Refresh the current folder |
 | `:archive` / `:delete` | Archive / trash the current thread |
@@ -347,6 +392,29 @@ not a one-shot command. It:
 
 Mutt suggests; in safe mode it never acts without your say-so.
 
+#### Reaching you on Google Chat
+
+With a Chat space configured (see [Setup](#4-optional-mutt-on-google-chat)), Mutt
+becomes reachable when you're not at the desk:
+
+- **It pings you** about urgent or VIP mail that lands while you're away
+  (presence is detected from keyboard/mouse idle time — macOS only for now).
+- **You reply with instructions** in the Chat space — *"archive the invoice"*,
+  *"what's urgent?"* — and Mutt picks them up and acts, answering back in Chat.
+- **The conversation is mirrored in the talk panel**: outgoing messages show as
+  `📤 to Chat:` and your replies as `📥 from Chat:`.
+- **Test it from the talk window** by typing *"send chat message …"* (or
+  *"test chat"*) — Mutt posts it to the space so you can confirm the round-trip.
+- Polling is **adaptive**: brisk (every few seconds) while a conversation is
+  live, ramping back to the normal cadence when it goes quiet, to balance API
+  calls against responsiveness.
+
+#### Inbox zero
+
+When the inbox empties, Mutt switches to a content state — a heart by his name, a
+short plan for staying at zero, and a happy dachshund fills the empty preview
+pane. New mail flips him back to work.
+
 ### Teaching bem: rules and tips
 
 - **`rules.md`** — standing filing instructions you author with `:rule`. They
@@ -389,7 +457,7 @@ defaults are shown below.
 ```toml
 editor = "nvim"                 # falls back to $EDITOR, then "vim"
 threads_per_page = 50           # pagination size
-theme = "dark"                  # "dark" or "light"
+theme = "dark"                  # "dark", "light", or "green" (1980s phosphor CRT)
 safe_mode = true                # true: save AI replies as drafts; false: send
 signature = "Best,\nBen"        # appended to AI reply drafts
 voice_notes = "Warm and concise. Match the sender's energy."
@@ -398,6 +466,11 @@ voice_notes = "Warm and concise. Match the sender's energy."
 ai_model_fast  = "claude-haiku-4-5-20251001"
 ai_model_smart = "claude-sonnet-4-6"
 ai_model_agent = "claude-opus-4-8"
+
+# Google Chat — let Mutt reach you when you're away (both optional)
+# google_chat_webhook = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=…"
+#                                 # send via this so your phone notifies you
+# google_chat_space   = "spaces/AAAA…"   # read your replies (two-way); bem chat-spaces
 
 # Usually supplied via the environment instead (see below)
 # anthropic_api_key = "sk-ant-..."
