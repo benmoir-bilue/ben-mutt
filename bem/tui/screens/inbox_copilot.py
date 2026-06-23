@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import traceback
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Optional
 
 from textual import events, work
@@ -87,6 +88,7 @@ class CopilotMixin:
         self._copilot_on = True
         self._copilot_feed = []
         self._copilot_undo = []
+        self._chat_after = None   # re-baseline Chat polling so we don't replay a backlog
         # Seed 'seen' with the current inbox so Mutt reacts only to NEW mail,
         # then give an initial digest of the top few threads already sitting here.
         self._seen_thread_ids = {t.id for t in self._threads}
@@ -130,6 +132,8 @@ class CopilotMixin:
             return
         if not worker.is_cancelled:
             self.app.call_from_thread(self._on_copilot_fetch, threads, token, present)
+        if not worker.is_cancelled:
+            self._poll_chat_instructions()
 
     @staticmethod
     def _inbox_signature(threads: list[Thread]) -> frozenset:
@@ -380,7 +384,8 @@ class CopilotMixin:
             lines.append(f"  {note}")
         lines.append("I'll hold it up top for you. Reply/return when you can.")
         try:
-            self._chat_client().send(self.config.google_chat_space, "\n".join(lines))
+            name = self._chat_client().send(self.config.google_chat_space, "\n".join(lines))
+            self._chat_sent_names.add(name)   # don't read our own ping back as an instruction
         except Exception as e:
             log.debug("chat ping failed: %s", e)
             return
@@ -391,6 +396,53 @@ class CopilotMixin:
         self.query_one(CopilotPanel).post_note(
             f"📱 pinged you on Chat about {sender}", "dim"
         )
+
+    def _poll_chat_instructions(self) -> None:
+        """Worker thread: read new messages in the Chat space and treat Ben's
+        replies as instructions for Mutt. Runs on the copilot poll cadence."""
+        if not self.config.google_chat_space or not self._copilot_on:
+            return
+        if self._chat_after is None:
+            # First poll: baseline at "now" so we don't replay old history.
+            self._chat_after = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            return
+        try:
+            msgs = self._chat_client().list_messages(
+                self.config.google_chat_space, after=self._chat_after
+            )
+        except Exception as e:
+            log.debug("chat poll failed: %s", e)
+            return
+        for m in msgs:
+            if m.create_time and m.create_time > self._chat_after:
+                self._chat_after = m.create_time
+            if m.name in self._chat_sent_names:
+                continue        # Mutt's own ping/reply — never act on it
+            text = (m.text or "").strip()
+            if text:
+                self.app.call_from_thread(self._on_chat_instruction, text)
+
+    def _on_chat_instruction(self, text: str) -> None:
+        """Main thread: an instruction arrived from Chat — show it and let Mutt
+        act, sending his reply back to the space."""
+        if not self._copilot_on:
+            return
+        panel = self.query_one(CopilotPanel)
+        panel.post_note("📱 from Chat:", "dim")
+        panel.post_user(text)
+        if self._is_demo_request(text):
+            self._copilot_demo_worker()
+        else:
+            self._copilot_chat_worker(text, to_chat=True)
+
+    def _send_chat_reply(self, text: str) -> None:
+        """Send Mutt's reply back to the Chat space, tracking it so the next
+        poll doesn't read it back as a fresh instruction."""
+        try:
+            name = self._chat_client().send(self.config.google_chat_space, text)
+            self._chat_sent_names.add(name)
+        except Exception as e:
+            log.debug("chat reply failed: %s", e)
 
     def _return_from_away(self) -> None:
         """Ben's back — lead with what changed while he was out."""
@@ -626,7 +678,7 @@ class CopilotMixin:
             self._copilot_chat_worker(message)
 
     @work(thread=True, exclusive=True, group="copilot-chat", exit_on_error=False)
-    def _copilot_chat_worker(self, text: str) -> None:
+    def _copilot_chat_worker(self, text: str, to_chat: bool = False) -> None:
         worker = get_current_worker()
         self._copilot_word += 1
         self.app.call_from_thread(self._copilot_begin_thinking, self._copilot_word)
@@ -651,6 +703,8 @@ class CopilotMixin:
             self._copilot_chat.append({"role": "user", "content": text})
             self._copilot_chat.append({"role": "assistant", "content": reply})
             self._copilot_chat = self._copilot_chat[-20:]
+            if to_chat:                       # instruction came from Chat — answer there
+                self._send_chat_reply(reply)
         self.app.call_from_thread(self._copilot_end_thinking)
 
     def _apply_copilot_ui(self, name: str, args: dict) -> str:

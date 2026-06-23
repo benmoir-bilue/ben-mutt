@@ -107,9 +107,11 @@ Config directory: {CONFIG_DIR}
 4. (Optional) Set ANTHROPIC_API_KEY for AI features.
 5. Run `bem` to authenticate and open your inbox.
 
-Google Chat (optional — lets Mutt message you when you're away):
+Google Chat (optional — Mutt messages you when away, and acts on your replies):
   • Run `bem chat-spaces` to list your spaces, then set google_chat_space.
   • `bem chat-test` sends a test message to confirm it works.
+  • Reply in that space with instructions ("archive the invoice") and Mutt
+    picks them up on his next poll and answers back there.
 
 Config file: {CONFIG_DIR / "config.toml"}
 Example config:

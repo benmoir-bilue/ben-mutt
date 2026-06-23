@@ -311,6 +311,8 @@ class InboxScreen(
         self._last_zero_plan: list[str] = []            # cached "stay at zero" plan
         self._chat = None                                # lazy Google Chat client
         self._chat_pinged: set[str] = set()             # threads already pinged about
+        self._chat_sent_names: set[str] = set()         # message ids Mutt posted (skip on read)
+        self._chat_after: Optional[str] = None          # RFC3339 high-water mark for polling
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)

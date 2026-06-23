@@ -23,9 +23,10 @@ VIPS_FILE = CONFIG_DIR / "vips.md"     # senders/domains that always jump the qu
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar.events",
-    # Google Chat: post messages (so Mutt can ping you when you're away) and
-    # list your spaces (so `bem chat-spaces` can find the space id for config).
-    "https://www.googleapis.com/auth/chat.messages.create",
+    # Google Chat: post messages (so Mutt can ping you when you're away), read
+    # messages (so he can act on your replies), and list your spaces (so
+    # `bem chat-spaces` can find the space id for config).
+    "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces.readonly",
 ]
 

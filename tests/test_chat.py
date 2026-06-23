@@ -13,15 +13,21 @@ class _Exec:
 
 
 class _Messages:
-    def __init__(self, sink): self.sink = sink
+    def __init__(self, sink, msg_pages, calls):
+        self.sink = sink
+        self._msg_pages = msg_pages
+        self.calls = calls
     def create(self, parent, body):
         self.sink.append((parent, body))
         return _Exec({"name": f"{parent}/messages/1"})
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        return _Exec(self._msg_pages.pop(0) if self._msg_pages else {"messages": []})
 
 
 class _Spaces:
-    def __init__(self, sink, pages):
-        self._messages = _Messages(sink)
+    def __init__(self, sink, pages, msg_pages, msg_calls):
+        self._messages = _Messages(sink, msg_pages, msg_calls)
         self._pages = pages
         self.tokens = []
     def messages(self): return self._messages
@@ -31,13 +37,17 @@ class _Spaces:
 
 
 class _Service:
-    def __init__(self, sink, pages): self._spaces = _Spaces(sink, pages)
+    def __init__(self, sink, pages, msg_pages, msg_calls):
+        self._spaces = _Spaces(sink, pages, msg_pages, msg_calls)
     def spaces(self): return self._spaces
 
 
-def _client(sink=None, pages=None):
+def _client(sink=None, pages=None, msg_pages=None, msg_calls=None):
     c = ChatClient(credentials=None)
-    c._local.service = _Service(sink if sink is not None else [], pages or [])
+    c._local.service = _Service(
+        sink if sink is not None else [], pages or [],
+        msg_pages or [], msg_calls if msg_calls is not None else [],
+    )
     return c
 
 
@@ -66,6 +76,29 @@ def test_list_spaces_paginates_and_maps_fields():
     assert [s.name for s in out] == ["spaces/A", "spaces/B"]
     assert out[0].display == "Team" and out[0].type == "SPACE"
     assert out[1].display == "" and out[1].type == "DIRECT_MESSAGE"
+
+
+def test_list_messages_builds_filter_and_maps():
+    calls = []
+    pages = [{"messages": [
+        {"name": "spaces/A/messages/1", "text": "archive 1",
+         "createTime": "2026-06-23T01:00:00.000000Z",
+         "sender": {"name": "users/123"}},
+    ]}]
+    c = _client(msg_pages=pages, msg_calls=calls)
+    out = c.list_messages("spaces/A", after="2026-06-23T00:00:00.000000Z")
+    assert calls[0]["parent"] == "spaces/A"
+    assert calls[0]["orderBy"] == "createTime asc"
+    assert calls[0]["filter"] == 'createTime > "2026-06-23T00:00:00.000000Z"'
+    assert out[0].name == "spaces/A/messages/1" and out[0].text == "archive 1"
+    assert out[0].sender == "users/123"
+
+
+def test_list_messages_without_after_omits_filter():
+    calls = []
+    c = _client(msg_pages=[{"messages": []}], msg_calls=calls)
+    c.list_messages("spaces/A")
+    assert "filter" not in calls[0]
 
 
 def test_is_vip_matches_name_or_address():
@@ -203,3 +236,95 @@ async def test_no_ping_without_configured_space(make_message, monkeypatch, tmp_p
         scr._on_copilot_fetch([vip], None, present=False)
         await pilot.pause()
         assert sent == []   # feature off when no space configured
+
+
+# ── Two-way: polling Ben's replies as instructions ────────────────────────────
+class _FakeChat:
+    """Stand-in for ChatClient on the screen: records sends, serves messages."""
+    def __init__(self, messages):
+        self._messages = messages
+        self.sent = []
+    def list_messages(self, space, after=None, limit=25):
+        return [m for m in self._messages if not after or m.create_time > after]
+    def send(self, space, text):
+        self.sent.append(text)
+        return f"{space}/messages/sent{len(self.sent)}"
+
+
+def _screen_app():
+    from bem.config import Config
+    from bem.tui.app import BemApp
+    from tests.test_copilot import _FakeGmail
+    return BemApp(gmail=_FakeGmail(), config=Config(google_chat_space="spaces/X"))
+
+
+@pytest.mark.asyncio
+async def test_first_poll_baselines_without_dispatch():
+    import asyncio
+    from bem.gchat import ChatMessage
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        seen = []
+        scr._on_chat_instruction = lambda text: seen.append(text)
+        scr._chat = _FakeChat([ChatMessage("spaces/X/messages/old", "ignore me",
+                                           "2020-01-01T00:00:00.000000Z", "users/1")])
+        assert scr._chat_after is None
+        await asyncio.to_thread(scr._poll_chat_instructions)
+        await pilot.pause()
+        assert scr._chat_after is not None    # baseline set
+        assert seen == []                      # nothing dispatched on the first poll
+
+
+@pytest.mark.asyncio
+async def test_poll_dispatches_new_and_skips_own():
+    import asyncio
+    from bem.gchat import ChatMessage
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        seen = []
+        scr._on_chat_instruction = lambda text: seen.append(text)
+        scr._chat_after = "2026-06-23T00:00:00.000000Z"          # past baseline → polls now
+        scr._chat_sent_names = {"spaces/X/messages/own"}          # Mutt's own ping
+        scr._chat = _FakeChat([
+            ChatMessage("spaces/X/messages/own", "🐕 Mutt ping",
+                        "2026-06-23T01:00:00.000000Z", "users/1"),
+            ChatMessage("spaces/X/messages/u1", "archive the invoice",
+                        "2026-06-23T01:05:00.000000Z", "users/1"),
+        ])
+        await asyncio.to_thread(scr._poll_chat_instructions)
+        await pilot.pause()
+        assert seen == ["archive the invoice"]                    # own ping skipped
+        assert scr._chat_after == "2026-06-23T01:05:00.000000Z"   # advanced past newest
+
+
+@pytest.mark.asyncio
+async def test_on_chat_instruction_runs_brain_to_chat():
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._copilot_on = True
+        scr._is_demo_request = lambda t: False
+        routed = []
+        scr._copilot_chat_worker = lambda text, to_chat=False: routed.append((text, to_chat))
+        scr._on_chat_instruction("file it under Finance")
+        await pilot.pause()
+        assert routed == [("file it under Finance", True)]        # answered back on Chat
+
+
+@pytest.mark.asyncio
+async def test_send_chat_reply_tracks_name():
+    app = _screen_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        scr = app.screen
+        scr._chat = _FakeChat([])
+        scr._send_chat_reply("done — archived it")
+        assert scr._chat.sent == ["done — archived it"]
+        assert "spaces/X/messages/sent1" in scr._chat_sent_names   # won't be read back

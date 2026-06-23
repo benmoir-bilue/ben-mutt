@@ -27,6 +27,14 @@ class ChatSpace:
     type: str           # "SPACE" | "DIRECT_MESSAGE" | "GROUP_CHAT" | ...
 
 
+@dataclass
+class ChatMessage:
+    name: str           # resource name, e.g. "spaces/A/messages/B"
+    text: str           # plain-text body
+    create_time: str    # RFC3339, e.g. "2026-06-23T01:02:03.456Z"
+    sender: str         # sender resource name (users/…)
+
+
 class ChatClient:
     def __init__(self, credentials: Credentials) -> None:
         self._credentials = credentials
@@ -54,6 +62,27 @@ class ChatClient:
             .execute()
         )
         return resp.get("name", "")
+
+    def list_messages(
+        self, space: str, after: str | None = None, limit: int = 25
+    ) -> list[ChatMessage]:
+        """Messages in `space`, oldest first. `after` is an RFC3339 timestamp —
+        only messages created strictly after it are returned (for polling)."""
+        if not space:
+            return []
+        kwargs = dict(parent=space, pageSize=limit, orderBy="createTime asc")
+        if after:
+            kwargs["filter"] = f'createTime > "{after}"'
+        resp = self._svc().spaces().messages().list(**kwargs).execute()
+        out: list[ChatMessage] = []
+        for m in resp.get("messages", []):
+            out.append(ChatMessage(
+                name=m.get("name", ""),
+                text=m.get("text", ""),
+                create_time=m.get("createTime", ""),
+                sender=(m.get("sender") or {}).get("name", ""),
+            ))
+        return out
 
     def list_spaces(self) -> list[ChatSpace]:
         """Every space Ben belongs to, for picking one to put in config."""
