@@ -54,6 +54,13 @@ _DEFAULT_ZERO_PLAN = [
 ]
 
 
+def _is_vip(sender_name: str, sender_address: str, matchers: list[str]) -> bool:
+    """True if the sender matches any VIP matcher (case-insensitive substring of
+    the name or address) — the same loose matching Mutt's memory uses."""
+    hay = f"{sender_name} {sender_address}".lower()
+    return any(m.strip() and m.strip().lower() in hay for m in matchers)
+
+
 class CopilotMixin:
     def _toggle_copilot(self) -> None:
         panel = self.query_one(CopilotPanel)
@@ -153,6 +160,8 @@ class CopilotMixin:
             self._return_from_away()
         if not present:
             self._away_new.extend((t.sender, t.subject) for t in new)
+            if new:
+                self._maybe_chat_ping(new)
 
         sig = self._inbox_signature(threads)
         if sig == self._inbox_sig:
@@ -315,6 +324,72 @@ class CopilotMixin:
         self._away_new = []
         self.query_one(CopilotPanel).post_note(
             "💤 you're away — I'll keep watch and brief you when you're back.", "dim"
+        )
+
+    # ── Google Chat pings (Mutt reaches Ben when he's away) ───────────────────
+
+    def _chat_client(self):
+        """Lazily build the Chat client, sharing the Gmail OAuth credentials."""
+        if self._chat is None:
+            from bem.gchat import ChatClient
+            self._chat = ChatClient(self.gmail.credentials)
+        return self._chat
+
+    def _ping_reason(self, thread: Thread, vips: list[str]) -> Optional[tuple[str, str]]:
+        """Should Mutt ping Ben about this while-away arrival? Returns
+        (reason, note) for a VIP sender or a high-urgency triage, else None."""
+        last = thread.last_message
+        addr = last.from_address if last else ""
+        if _is_vip(thread.sender, addr, vips):
+            return ("VIP", "")
+        if self._copilot is None:
+            return None  # can't judge urgency without the brain; VIP is enough
+        try:
+            note = self._copilot.triage(thread, rules=_load_rules())
+        except Exception as e:
+            log.debug("chat-ping triage failed: %s", e)
+            return None
+        if note.urgency == "high":
+            return ("urgent", note.summary)
+        return None
+
+    def _maybe_chat_ping(self, new_threads: list[Thread]) -> None:
+        """While away, message Ben on Google Chat about urgent/VIP arrivals."""
+        if not self.config.google_chat_space or not self._copilot_on:
+            return
+        from bem.ai import memory
+        vips = memory.load_vips()
+        for thread in new_threads[:5]:           # cap work on a burst of mail
+            if thread.id in self._chat_pinged:
+                continue
+            reason = self._ping_reason(thread, vips)
+            if reason is None:
+                continue
+            self._chat_pinged.add(thread.id)
+            self._send_chat_ping(thread.sender, thread.subject, reason[0], reason[1])
+
+    @work(thread=True, group="chat-ping", exit_on_error=False)
+    def _send_chat_ping(self, sender: str, subject: str, reason: str, note: str) -> None:
+        worker = get_current_worker()
+        tag = "⭐ VIP" if reason == "VIP" else "🔴 urgent"
+        lines = [
+            f"🐕 Mutt here — you're away and something {tag} just landed:",
+            f"• {sender} — {subject}",
+        ]
+        if note:
+            lines.append(f"  {note}")
+        lines.append("I'll hold it up top for you. Reply/return when you can.")
+        try:
+            self._chat_client().send(self.config.google_chat_space, "\n".join(lines))
+        except Exception as e:
+            log.debug("chat ping failed: %s", e)
+            return
+        if not worker.is_cancelled:
+            self.app.call_from_thread(self._note_chat_pinged, sender)
+
+    def _note_chat_pinged(self, sender: str) -> None:
+        self.query_one(CopilotPanel).post_note(
+            f"📱 pinged you on Chat about {sender}", "dim"
         )
 
     def _return_from_away(self) -> None:

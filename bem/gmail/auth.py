@@ -17,7 +17,7 @@ def authenticate() -> Credentials:
     # A token granted before a scope was added stays "valid", but calls needing
     # the new scope would 403. Force a fresh consent when scopes are missing.
     if creds and not _has_required_scopes():
-        print("bem: additional Google permissions needed (Calendar), re-authenticating")
+        print("bem: additional Google permissions needed (Calendar/Chat), re-authenticating")
         creds = None
 
     if creds and creds.valid:

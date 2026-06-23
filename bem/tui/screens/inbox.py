@@ -309,6 +309,8 @@ class InboxScreen(
         self._inbox_sig = None                          # inbox fingerprint, to re-rank on change
         self._inbox_zero = False                        # at zero → Mutt guards + plans to stay
         self._last_zero_plan: list[str] = []            # cached "stay at zero" plan
+        self._chat = None                                # lazy Google Chat client
+        self._chat_pinged: set[str] = set()             # threads already pinged about
         self._copilot_undo: list[dict] = []           # reversible actions Mutt took
         self._copilot_hidden_for_agent = False         # Mutt tucked away during an agent run
         self._present = True                            # is Ben at the keyboard? (presence)

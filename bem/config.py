@@ -23,6 +23,10 @@ VIPS_FILE = CONFIG_DIR / "vips.md"     # senders/domains that always jump the qu
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar.events",
+    # Google Chat: post messages (so Mutt can ping you when you're away) and
+    # list your spaces (so `bem chat-spaces` can find the space id for config).
+    "https://www.googleapis.com/auth/chat.messages.create",
+    "https://www.googleapis.com/auth/chat.spaces.readonly",
 ]
 
 # Backwards-compatible alias (the list now covers more than Gmail).
@@ -44,6 +48,10 @@ class Config:
     theme: str = "dark"
     sort_threads: str = "date"  # date | from | subject
     safe_mode: bool = True
+    # Google Chat space (e.g. "spaces/AAAA…") Mutt pings when you're away and
+    # something urgent/VIP lands. Empty disables Chat pings. Find it with
+    # `bem chat-spaces`.
+    google_chat_space: str = ""
     ai_model_fast: str = "claude-haiku-4-5-20251001"   # triage, summarise, explain
     ai_model_smart: str = "claude-sonnet-4-6"           # reply-draft, custom
     ai_model_agent: str = "claude-opus-4-8"             # agentic :sort / :agent
